@@ -9,12 +9,13 @@ import { WebSocketServer } from 'ws'
 import type { Request, Response, NextFunction } from 'express'
 import { ConfigStore, getRuntimeConfig, redactConfig, type RuntimeConfig } from '../core/config.js'
 import { RevisionConflictError, validateGraph } from '../core/graph.js'
-import { NODE_REGISTRY, defaultConfigForNode, getNodeDefinition } from '../core/node-registry.js'
+import { NODE_REGISTRY } from '../core/node-registry.js'
 import { OpenCodeBridge } from '../core/opencode-bridge.js'
 import { WorkflowRunner } from '../core/runner.js'
 import { RunQueue } from '../core/run-queue.js'
 import { WorkspaceStorage } from '../core/storage.js'
 import type { ArtifactRef, CanvasNode, GraphPatch, ImageProviderProfile, RunEvent, WorkflowGraph } from '../core/types.js'
+import { graphPatchSchema, selectionStateSchema, workflowGraphSchema } from '../core/schemas.js'
 import { nowIso } from '../core/utils.js'
 
 export interface AppRuntime {
@@ -60,12 +61,18 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   app.get('/api/workspace', async (_req, res) => res.json(await storage.context()))
   app.get('/api/graph', async (_req, res) => res.json(await storage.loadGraph()))
   app.put('/api/graph', async (req, res) => {
-    const graph = req.body as WorkflowGraph
+    const parsed = workflowGraphSchema.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid graph schema', issues: parsed.error.issues })
+    const graph = parsed.data as WorkflowGraph
     const validation = validateGraph(graph)
     if (!validation.valid) return res.status(400).json(validation)
     res.json(await storage.saveGraph(graph, Number(req.body.revision), `web-full-${nanoid(8)}`))
   })
-  app.post('/api/graph/patch', async (req, res) => res.json(await storage.applyPatch(req.body as GraphPatch)))
+  app.post('/api/graph/patch', async (req, res) => {
+    const parsed = graphPatchSchema.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid patch schema', issues: parsed.error.issues })
+    res.json(await storage.applyPatch(parsed.data as GraphPatch))
+  })
   app.get('/api/graph/revisions', async (_req, res) => res.json(await storage.listGraphRevisions()))
   app.post('/api/graph/revisions/:revision/restore', async (req, res) => res.json(await storage.restoreGraphRevision(Number(req.params.revision))))
   app.post('/api/graph/reset', async (_req, res) => {
@@ -80,25 +87,13 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   })
 
   app.get('/api/node-registry', (_req, res) => res.json(NODE_REGISTRY))
-  app.post('/api/nodes', async (req, res) => {
-    const nodeType = String(req.body.nodeType || '')
-    const definition = getNodeDefinition(nodeType)
-    if (!definition) return res.status(400).json({ error: `Unknown node type: ${nodeType}` })
-    const graph = await storage.loadGraph()
-    const node: CanvasNode = {
-      id: `node-${nanoid(8)}`, type: 'workflow', position: req.body.position || { x: 100, y: 100 },
-      width: definition.defaultSize?.width, height: definition.defaultSize?.height,
-      data: { nodeType, config: { ...defaultConfigForNode(nodeType), ...(req.body.config || {}) }, status: 'idle', freeform: definition.category === 'canvas' }
-    }
-    const next = await storage.applyPatch({ transactionId: `add-node-${nanoid(8)}`, baseRevision: graph.revision, operations: [{ op: 'addNode', node }] })
-    res.status(201).json({ node, graph: next })
-  })
 
   app.get('/api/selection', async (_req, res) => res.json(await storage.loadSelection()))
-  app.put('/api/selection', async (req, res) => res.json(await storage.saveSelection({
-    selectedNodeIds: Array.isArray(req.body.selectedNodeIds) ? req.body.selectedNodeIds : [],
-    selectedEdgeIds: Array.isArray(req.body.selectedEdgeIds) ? req.body.selectedEdgeIds : []
-  })))
+  app.put('/api/selection', async (req, res) => {
+    const parsed = selectionStateSchema.pick({ selectedNodeIds: true, selectedEdgeIds: true }).safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid selection schema', issues: parsed.error.issues })
+    res.json(await storage.saveSelection(parsed.data))
+  })
 
   app.post('/api/uploads', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'file is required' })

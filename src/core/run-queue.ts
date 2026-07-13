@@ -9,8 +9,10 @@ import { nowIso } from './utils.js'
 export class RunQueue extends EventEmitter {
   readonly workerId = `worker-${process.pid}-${nanoid(6)}`
   private timer?: NodeJS.Timeout
+  private recoveryTimer?: NodeJS.Timeout
   private stopped = true
   private active = 0
+  private lastRecoveryAt = 0
 
   constructor(private readonly storage: WorkspaceStorage, private readonly runner: WorkflowRunner, private readonly config: RuntimeConfig) {
     super()
@@ -22,13 +24,17 @@ export class RunQueue extends EventEmitter {
     this.stopped = false
     this.timer = setInterval(() => void this.tick(), 250)
     this.timer.unref()
+    this.recoveryTimer = setInterval(() => void this.recover().catch(() => undefined), 10_000)
+    this.recoveryTimer.unref()
     void this.tick()
   }
 
   stop(): void {
     this.stopped = true
     if (this.timer) clearInterval(this.timer)
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer)
     this.timer = undefined
+    this.recoveryTimer = undefined
   }
 
   async enqueue(targetNodeId?: string, graphId = 'main'): Promise<WorkflowRun> {
@@ -41,6 +47,17 @@ export class RunQueue extends EventEmitter {
   }
 
   async cancel(runId: string): Promise<boolean> { return this.runner.cancel(runId) }
+
+  private async recover(): Promise<void> {
+    const now = Date.now()
+    if (now - this.lastRecoveryAt < 10_000) return
+    this.lastRecoveryAt = now
+    const recovered = await this.storage.recoverExpiredRuns()
+    if (recovered > 0) {
+      this.emit('event', { type: 'run-recovered', message: `Recovered ${recovered} expired run lease(s).`, timestamp: nowIso() })
+      void this.tick()
+    }
+  }
 
   private async tick(): Promise<void> {
     if (this.stopped) return

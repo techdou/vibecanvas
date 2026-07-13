@@ -14,7 +14,7 @@ import { Image2Provider } from './image-provider.js'
 import { OpenCodeBridge, type OpenCodeFilePartInput } from './opencode-bridge.js'
 import { evaluationReportSchema, promptSpecSchema } from './schemas.js'
 import { WorkspaceStorage } from './storage.js'
-import { nowIso, sha256, stableStringify } from './utils.js'
+import { nowIso, sha256, stableStringify, ensureDir } from './utils.js'
 
 interface NodeExecutionResult { outputs: Record<string, unknown>; estimatedCostUsd?: number; actualCostUsd?: number }
 
@@ -122,12 +122,24 @@ export class WorkflowRunner extends EventEmitter {
   }
 
   async cancel(runId: string): Promise<boolean> {
+    // Abort the in-flight execution (fetch, sleep, etc.) via the AbortController.
+    // Do NOT call openCode.abortSession(undefined) — it targets the shared global
+    // session and would disrupt unrelated concurrent runs. The AbortController is
+    // already threaded into every fetch this run performs.
     this.activeControllers.get(runId)?.abort('Cancelled by user.')
-    const [cancelled] = await Promise.all([
-      this.storage.cancelRun(runId),
-      this.openCode.abortSession(undefined).catch(() => false)
-    ])
-    return cancelled
+    // Propagate cancellation to subflow child runs so they stop burning API budget.
+    await this.cancelSubflowChildren(runId)
+    return this.storage.cancelRun(runId)
+  }
+
+  private async cancelSubflowChildren(runId: string): Promise<void> {
+    const run = await this.storage.loadRun(runId).catch(() => undefined)
+    if (!run) return
+    const childIds = Object.values(run.nodeRuns)
+      .filter((record) => record.nodeType === 'workflow.subflow' && record.outputs)
+      .map((record) => (record.outputs as { metadata?: { childRunId?: string } }).metadata?.childRunId)
+      .filter((childId): childId is string => Boolean(childId))
+    await Promise.all(childIds.map((childId) => this.cancel(childId)))
   }
 
   capabilities() { return this.imageProvider.capabilities() }
@@ -154,127 +166,155 @@ export class WorkflowRunner extends EventEmitter {
     const config = node.data.config
     switch (node.data.nodeType) {
       case 'input.brief': case 'input.prompt': case 'canvas.note': return { outputs: { text: asString(config.text) } }
-      case 'input.image': case 'canvas.image': {
-        const artifactId = asString(config.artifactId)
-        if (!artifactId) throw new Error('请先上传或连接图片。')
-        return { outputs: { image: await this.requireArtifact(artifactId) } }
-      }
-      case 'input.mask': {
-        const artifact = await this.requireArtifact(asString(config.artifactId))
-        if (artifact.kind !== 'mask') throw new Error('选择的 Artifact 不是蒙版。')
-        return { outputs: { mask: artifact } }
-      }
-      case 'input.annotation': case 'canvas.annotation': {
-        const artifactId = asString(config.artifactId)
-        const artifact = artifactId ? await this.requireArtifact(artifactId) : undefined
-        return { outputs: { annotation: artifact, text: asString(config.text) } }
-      }
+      case 'input.image': case 'canvas.image': return this.executeImageInput(config)
+      case 'input.mask': return this.executeMaskInput(config)
+      case 'input.annotation': case 'canvas.annotation': return this.executeAnnotationInput(config)
       case 'utility.aspect-ratio': return { outputs: { ratio: normalizeRatio(config.width, config.height) } }
-      case 'agent.prompt-architect': {
-        const brief = asString(inputs.brief)
-        if (!brief) throw new Error('Prompt 设计节点缺少创作需求。')
-        const references = asArtifacts(inputs.references)
-        if (asBoolean(config.useOpenCode) && this.config.openCode.sessionId) {
-          const response = await this.promptArchitectWithOpenCode(brief, config, references, signal)
-          return { outputs: { promptSpec: response.promptSpec }, actualCostUsd: response.cost }
-        }
-        return { outputs: { promptSpec: buildPromptSpec(brief, config, references) } }
-      }
-      case 'image.generate': {
-        const prompt = requirePromptSpec(inputs.prompt)
-        const ratio = normalizeRatioFromUnknown(inputs.size)
-        const quality = asString(config.quality, 'high')
-        const response = await this.imageProvider.generate({
-          prompt, width: ratio.width, height: ratio.height, quality,
-          candidateCount: clamp(asNumber(config.candidateCount, 1), 1, this.imageProvider.capabilities().maxCandidates),
-          outputFormat: asString(config.outputFormat, this.config.image.outputFormat), runId: run.id, nodeId: node.id, signal
-        })
-        return { outputs: { images: response.artifacts, metadata: response.metadata }, estimatedCostUsd: response.estimatedCostUsd }
-      }
-      case 'image.edit': {
-        const source = requireArtifact(inputs.source)
-        let prompt = requirePromptSpec(inputs.prompt)
-        const annotation = asOptionalArtifact(inputs.annotation)
-        const annotationInstruction = asString(config.annotationInstruction)
-        if (annotationInstruction) prompt = { ...prompt, finalPrompt: `${prompt.finalPrompt}\n\n${annotationInstruction}` }
-        const ratio = normalizeRatioFromUnknown(inputs.size, source.width, source.height)
-        const quality = asString(config.quality, 'high')
-        const response = await this.imageProvider.edit({
-          prompt, width: ratio.width, height: ratio.height, quality,
-          candidateCount: clamp(asNumber(config.candidateCount, 1), 1, this.imageProvider.capabilities().maxCandidates),
-          outputFormat: this.config.image.outputFormat, runId: run.id, nodeId: node.id,
-          source, references: asArtifacts(inputs.references), mask: asOptionalArtifact(inputs.mask), annotation, signal
-        })
-        return { outputs: { images: response.artifacts, metadata: response.metadata }, estimatedCostUsd: response.estimatedCostUsd }
-      }
-      case 'image.resize': {
-        const image = requireArtifact(inputs.image)
-        const ratio = inputs.size ? normalizeRatioFromUnknown(inputs.size) : normalizeRatio(config.width, config.height)
-        const fit = asString(config.fit, 'contain') as keyof sharp.FitEnum
-        const outputPath = path.join(this.storage.runsDir, run.id, node.id, `resized-${ratio.width}x${ratio.height}.png`)
-        const { ensureDir } = await import('./utils.js'); await ensureDir(path.dirname(outputPath))
-        if (signal.aborted) throw new DOMException('Run cancelled.', 'AbortError')
-        await sharp(image.filePath).resize(ratio.width, ratio.height, { fit }).png().toFile(outputPath)
-        if (signal.aborted) throw new DOMException('Run cancelled.', 'AbortError')
-        const artifact = await this.storage.registerArtifact({ filePath: outputPath, kind: 'image', status: 'candidate', runId: run.id, nodeId: node.id, parentArtifactIds: [image.id], metadata: { operation: 'resize', width: ratio.width, height: ratio.height, fit } })
-        return { outputs: { image: artifact } }
-      }
-      case 'control.human-select': {
-        const images = asArtifacts(inputs.images)
-        if (!images.length) throw new Error('候选图片选择器没有候选图片。')
-        const selectedId = asString(config.selectedArtifactId)
-        if (selectedId) {
-          const selected = images.find((item) => item.id === selectedId)
-          if (!selected) throw new Error('已选 Artifact 不属于当前候选集。')
-          await this.storage.updateArtifactStatus(selected.id, 'selected', { selectedByRunId: run.id, selectedAt: nowIso() })
-          return { outputs: { selected } }
-        }
-        if (images.length === 1 && asBoolean(config.autoSelectSingle, true)) {
-          const selected = await this.storage.updateArtifactStatus(images[0].id, 'selected', { selectedByRunId: run.id, selectedAt: nowIso(), autoSelected: true })
-          return { outputs: { selected } }
-        }
-        throw new NeedsInputError('请选择一张候选图片后继续运行。', { candidateArtifactIds: images.map((item) => item.id), candidates: images })
-      }
-      case 'review.quality': {
-        const images = asArtifacts(inputs.images)
-        if (!images.length) throw new Error('质量评审节点没有候选图片。')
-        const minimumScore = asNumber(config.minimumScore, 70)
-        const mode = asString(config.reviewMode, 'hybrid')
-        const technical = await technicalReview(images, minimumScore)
-        if (mode === 'technical') return { outputs: { selected: images[technical.selectedIndex], images, report: technical } }
-        if (!this.config.openCode.sessionId) {
-          if (mode === 'agent') throw new Error('Agent Vision Review requires an OpenCode session ID.')
-          technical.issues.push({ code: 'agent-unavailable', severity: 'warning', message: 'OpenCode session is not configured; used technical review only.' })
-          return { outputs: { selected: images[technical.selectedIndex], images, report: technical } }
-        }
-        const agent = await this.visionReviewWithOpenCode(images, asString(inputs.brief), minimumScore, signal)
-        const report = mode === 'hybrid' ? combineReviews(technical, agent.report, minimumScore) : agent.report
-        return { outputs: { selected: images[report.selectedIndex], images, report }, actualCostUsd: agent.cost }
-      }
-      case 'workflow.subflow': {
-        const templateId = asString(config.templateId)
-        if (!templateId) throw new Error('子工作流节点缺少 templateId。')
-        const template = (await this.storage.listTemplates()).find((item) => item.id === templateId)
-        if (!template) throw new Error(`Subworkflow template not found: ${templateId}`)
-        const childGraph = structuredClone(template.graph)
-        injectSubworkflowInput(childGraph, asString(config.inputNodeId), inputs.input)
-        const childWorkerId = `${workerId}:subflow:${node.id}`
-        const child = await this.storage.enqueueRun(childGraph, asString(config.outputNodeId) || undefined, 1, { status: 'running', workerId: childWorkerId })
-        const completed = await this.execute(child, childWorkerId, depth + 1)
-        if (completed.status !== 'completed') throw new Error(`Subworkflow ${templateId} ended with status ${completed.status}: ${completed.error || ''}`)
-        const outputNodeId = asString(config.outputNodeId) || Object.keys(completed.nodeRuns).at(-1)
-        const output = outputNodeId ? completed.nodeRuns[outputNodeId]?.outputs : undefined
-        return { outputs: { output, metadata: { childRunId: completed.id, templateId, status: completed.status } }, estimatedCostUsd: completed.estimatedCostUsd, actualCostUsd: completed.actualCostUsd }
-      }
-      case 'output.canvas': {
-        let image = requireArtifact(inputs.image)
-        const markFinal = asBoolean(config.markFinal)
-        if (markFinal) image = await this.storage.updateArtifactStatus(image.id, 'final', { finalizedByRunId: run.id, finalizedAt: nowIso() })
-        const placedNodeId = await this.placeOutputArtifact(graph, node, image, run.id, asString(config.placement, 'right'), asString(config.replaceNodeId))
-        return { outputs: { artifact: image, placedNodeId } }
-      }
+      case 'agent.prompt-architect': return this.executePromptArchitect(inputs, config, signal)
+      case 'image.generate': return this.executeImageGenerate(inputs, config, run, node, signal)
+      case 'image.edit': return this.executeImageEdit(inputs, config, run, node, signal)
+      case 'image.resize': return this.executeImageResize(inputs, config, run, node, signal)
+      case 'control.human-select': return this.executeHumanSelect(inputs, config, run)
+      case 'review.quality': return this.executeQualityReview(inputs, config, signal)
+      case 'workflow.subflow': return this.executeSubflow(config, inputs, run, workerId, depth)
+      case 'output.canvas': return this.executeOutputCanvas(inputs, config, run, graph, node)
       default: throw new Error(`No executor registered for node type: ${node.data.nodeType}`)
     }
+  }
+
+  private async executeImageInput(config: Record<string, unknown>): Promise<NodeExecutionResult> {
+    const artifactId = asString(config.artifactId)
+    if (!artifactId) throw new Error('请先上传或连接图片。')
+    return { outputs: { image: await this.requireArtifact(artifactId) } }
+  }
+
+  private async executeMaskInput(config: Record<string, unknown>): Promise<NodeExecutionResult> {
+    const artifact = await this.requireArtifact(asString(config.artifactId))
+    if (artifact.kind !== 'mask') throw new Error('选择的 Artifact 不是蒙版。')
+    return { outputs: { mask: artifact } }
+  }
+
+  private async executeAnnotationInput(config: Record<string, unknown>): Promise<NodeExecutionResult> {
+    const artifactId = asString(config.artifactId)
+    const artifact = artifactId ? await this.requireArtifact(artifactId) : undefined
+    return { outputs: { annotation: artifact, text: asString(config.text) } }
+  }
+
+  private async executePromptArchitect(inputs: Record<string, unknown>, config: Record<string, unknown>, signal: AbortSignal): Promise<NodeExecutionResult> {
+    const brief = asString(inputs.brief)
+    if (!brief) throw new Error('Prompt 设计节点缺少创作需求。')
+    const references = asArtifacts(inputs.references)
+    if (asBoolean(config.useOpenCode) && this.config.openCode.sessionId) {
+      const response = await this.promptArchitectWithOpenCode(brief, config, references, signal)
+      return { outputs: { promptSpec: response.promptSpec }, actualCostUsd: response.cost }
+    }
+    return { outputs: { promptSpec: buildPromptSpec(brief, config, references) } }
+  }
+
+  private async executeImageGenerate(inputs: Record<string, unknown>, config: Record<string, unknown>, run: WorkflowRun, node: CanvasNode, signal: AbortSignal): Promise<NodeExecutionResult> {
+    const prompt = requirePromptSpec(inputs.prompt)
+    const ratio = normalizeRatioFromUnknown(inputs.size)
+    const quality = asString(config.quality, 'high')
+    const response = await this.imageProvider.generate({
+      prompt, width: ratio.width, height: ratio.height, quality,
+      candidateCount: clamp(asNumber(config.candidateCount, 1), 1, this.imageProvider.capabilities().maxCandidates),
+      outputFormat: asString(config.outputFormat, this.config.image.outputFormat), runId: run.id, nodeId: node.id, signal
+    })
+    return { outputs: { images: response.artifacts, metadata: response.metadata }, estimatedCostUsd: response.estimatedCostUsd }
+  }
+
+  private async executeImageEdit(inputs: Record<string, unknown>, config: Record<string, unknown>, run: WorkflowRun, node: CanvasNode, signal: AbortSignal): Promise<NodeExecutionResult> {
+    const source = requireArtifact(inputs.source)
+    let prompt = requirePromptSpec(inputs.prompt)
+    const annotation = asOptionalArtifact(inputs.annotation)
+    const annotationInstruction = asString(config.annotationInstruction)
+    if (annotationInstruction) prompt = { ...prompt, finalPrompt: `${prompt.finalPrompt}\n\n${annotationInstruction}` }
+    const ratio = normalizeRatioFromUnknown(inputs.size, source.width, source.height)
+    const quality = asString(config.quality, 'high')
+    const response = await this.imageProvider.edit({
+      prompt, width: ratio.width, height: ratio.height, quality,
+      candidateCount: clamp(asNumber(config.candidateCount, 1), 1, this.imageProvider.capabilities().maxCandidates),
+      outputFormat: this.config.image.outputFormat, runId: run.id, nodeId: node.id,
+      source, references: asArtifacts(inputs.references), mask: asOptionalArtifact(inputs.mask), annotation, signal
+    })
+    return { outputs: { images: response.artifacts, metadata: response.metadata }, estimatedCostUsd: response.estimatedCostUsd }
+  }
+
+  private async executeImageResize(inputs: Record<string, unknown>, config: Record<string, unknown>, run: WorkflowRun, node: CanvasNode, signal: AbortSignal): Promise<NodeExecutionResult> {
+    const image = requireArtifact(inputs.image)
+    const ratio = inputs.size ? normalizeRatioFromUnknown(inputs.size) : normalizeRatio(config.width, config.height)
+    const fit = asString(config.fit, 'contain') as keyof sharp.FitEnum
+    const outputPath = path.join(this.storage.runsDir, run.id, node.id, `resized-${ratio.width}x${ratio.height}.png`)
+    await ensureDir(path.dirname(outputPath))
+    if (signal.aborted) throw new DOMException('Run cancelled.', 'AbortError')
+    await sharp(image.filePath).resize(ratio.width, ratio.height, { fit }).png().toFile(outputPath)
+    if (signal.aborted) throw new DOMException('Run cancelled.', 'AbortError')
+    const artifact = await this.storage.registerArtifact({ filePath: outputPath, kind: 'image', status: 'candidate', runId: run.id, nodeId: node.id, parentArtifactIds: [image.id], metadata: { operation: 'resize', width: ratio.width, height: ratio.height, fit } })
+    return { outputs: { image: artifact } }
+  }
+
+  private async executeHumanSelect(inputs: Record<string, unknown>, config: Record<string, unknown>, run: WorkflowRun): Promise<NodeExecutionResult> {
+    const images = asArtifacts(inputs.images)
+    if (!images.length) throw new Error('候选图片选择器没有候选图片。')
+    const selectedId = asString(config.selectedArtifactId)
+    if (selectedId) {
+      const selected = images.find((item) => item.id === selectedId)
+      if (!selected) throw new Error('已选 Artifact 不属于当前候选集。')
+      await this.storage.updateArtifactStatus(selected.id, 'selected', { selectedByRunId: run.id, selectedAt: nowIso() })
+      return { outputs: { selected } }
+    }
+    if (images.length === 1 && asBoolean(config.autoSelectSingle, true)) {
+      const selected = await this.storage.updateArtifactStatus(images[0].id, 'selected', { selectedByRunId: run.id, selectedAt: nowIso(), autoSelected: true })
+      return { outputs: { selected } }
+    }
+    throw new NeedsInputError('请选择一张候选图片后继续运行。', { candidateArtifactIds: images.map((item) => item.id), candidates: images })
+  }
+
+  private async executeQualityReview(inputs: Record<string, unknown>, config: Record<string, unknown>, signal: AbortSignal): Promise<NodeExecutionResult> {
+    const images = asArtifacts(inputs.images)
+    if (!images.length) throw new Error('质量评审节点没有候选图片。')
+    const minimumScore = asNumber(config.minimumScore, 70)
+    const mode = asString(config.reviewMode, 'hybrid')
+    const technical = await technicalReview(images, minimumScore)
+    if (mode === 'technical') return { outputs: { selected: images[technical.selectedIndex], images, report: technical } }
+    if (!this.config.openCode.sessionId) {
+      if (mode === 'agent') throw new Error('Agent Vision Review requires an OpenCode session ID.')
+      technical.issues.push({ code: 'agent-unavailable', severity: 'warning', message: 'OpenCode session is not configured; used technical review only.' })
+      return { outputs: { selected: images[technical.selectedIndex], images, report: technical } }
+    }
+    const agent = await this.visionReviewWithOpenCode(images, asString(inputs.brief), minimumScore, signal)
+    const report = mode === 'hybrid' ? combineReviews(technical, agent.report, minimumScore) : agent.report
+    return { outputs: { selected: images[report.selectedIndex], images, report }, actualCostUsd: agent.cost }
+  }
+
+  private async executeSubflow(config: Record<string, unknown>, inputs: Record<string, unknown>, run: WorkflowRun, workerId: string, depth: number): Promise<NodeExecutionResult> {
+    const templateId = asString(config.templateId)
+    if (!templateId) throw new Error('子工作流节点缺少 templateId。')
+    const template = (await this.storage.listTemplates()).find((item) => item.id === templateId)
+    if (!template) throw new Error(`Subworkflow template not found: ${templateId}`)
+    const childGraph = structuredClone(template.graph)
+    injectSubworkflowInput(childGraph, asString(config.inputNodeId), inputs.input)
+    const childWorkerId = `${workerId}:subflow:${run.id}`
+    const child = await this.storage.enqueueRun(childGraph, asString(config.outputNodeId) || undefined, 1, { status: 'running', workerId: childWorkerId })
+    // Link parent cancellation to the child: when the parent aborts, abort the child too.
+    const parentController = this.activeControllers.get(run.id)
+    const onParentAbort = () => this.activeControllers.get(child.id)?.abort('Parent run cancelled.')
+    parentController?.signal.addEventListener('abort', onParentAbort, { once: true })
+    let completed: WorkflowRun
+    try { completed = await this.execute(child, childWorkerId, depth + 1) }
+    finally { parentController?.signal.removeEventListener('abort', onParentAbort) }
+    if (completed.status !== 'completed') throw new Error(`Subworkflow ${templateId} ended with status ${completed.status}: ${completed.error || ''}`)
+    const outputNodeId = asString(config.outputNodeId) || Object.keys(completed.nodeRuns).at(-1)
+    const output = outputNodeId ? completed.nodeRuns[outputNodeId]?.outputs : undefined
+    return { outputs: { output, metadata: { childRunId: completed.id, templateId, status: completed.status } }, estimatedCostUsd: completed.estimatedCostUsd, actualCostUsd: completed.actualCostUsd }
+  }
+
+  private async executeOutputCanvas(inputs: Record<string, unknown>, config: Record<string, unknown>, run: WorkflowRun, graph: WorkflowGraph, node: CanvasNode): Promise<NodeExecutionResult> {
+    let image = requireArtifact(inputs.image)
+    const markFinal = asBoolean(config.markFinal)
+    if (markFinal) image = await this.storage.updateArtifactStatus(image.id, 'final', { finalizedByRunId: run.id, finalizedAt: nowIso() })
+    const placedNodeId = await this.placeOutputArtifact(graph, node, image, run.id, asString(config.placement, 'right'), asString(config.replaceNodeId))
+    return { outputs: { artifact: image, placedNodeId } }
   }
 
   private async placeOutputArtifact(snapshot: WorkflowGraph, outputNode: CanvasNode, image: ArtifactRef, runId: string, placement: string, explicitTarget: string): Promise<string> {
@@ -372,7 +412,10 @@ export class WorkflowRunner extends EventEmitter {
     return sha256(stableStringify({ nodeType: node.data.nodeType, version: definition?.version, config: node.data.config, inputs: normalizeCacheValue(inputs), provider: this.config.image.id, model: this.config.image.model }))
   }
 
-  private emitEvent(event: RunEvent): void { void this.storage.appendRunEvent(event); this.emit('event', event) }
+  private emitEvent(event: RunEvent): void {
+    void this.storage.appendRunEvent(event).catch((error) => this.emit('error', new Error(`Failed to persist run event: ${error instanceof Error ? error.message : String(error)}`)))
+    this.emit('event', event)
+  }
 }
 
 function shouldCache(node: CanvasNode): boolean { return !['control.human-select', 'output.canvas', 'workflow.subflow'].includes(node.data.nodeType) }

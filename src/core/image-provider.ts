@@ -218,8 +218,12 @@ export class Image2Provider {
   private async downloadRemoteImage(rawUrl: string, signal?: AbortSignal): Promise<Buffer> {
     let current = new URL(rawUrl)
     for (let redirect = 0; redirect <= 3; redirect += 1) {
-      await assertSafeRemoteUrl(current, this.config)
-      const response = await fetchWithTimeout(current.toString(), { method: 'GET', headers: this.config.downloadHeaders, redirect: 'manual' }, this.config.timeoutMs, signal)
+      const pinned = await assertSafeRemoteUrl(current, this.config)
+      // Use the resolved IP directly in the URL to prevent DNS rebinding between validation and fetch.
+      const pinnedUrl = pinned ? buildIpPinnedUrl(current, pinned) : current
+      const headers = { ...this.config.downloadHeaders }
+      if (pinned && current.hostname !== pinned) headers.host = current.host
+      const response = await fetchWithTimeout(pinnedUrl.toString(), { method: 'GET', headers, redirect: 'manual' }, this.config.timeoutMs, signal)
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location')
         if (!location) throw new Error('Image download redirect did not include a Location header.')
@@ -342,14 +346,24 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-async function assertSafeRemoteUrl(url: URL, profile: ImageProviderProfile): Promise<void> {
+async function assertSafeRemoteUrl(url: URL, profile: ImageProviderProfile): Promise<string | undefined> {
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`Unsupported image URL protocol: ${url.protocol}`)
   if (url.username || url.password) throw new Error('Generated image URLs may not contain embedded credentials.')
   const host = url.hostname.toLowerCase()
   if (profile.allowedImageHosts.length && !profile.allowedImageHosts.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) throw new Error(`Image URL host is not allowed: ${host}`)
-  if (profile.allowPrivateImageUrls) return
+  if (profile.allowPrivateImageUrls) return undefined
   const addresses = isIP(host) ? [{ address: host }] : await lookup(host, { all: true })
   for (const { address } of addresses) if (isPrivateAddress(address)) throw new Error(`Blocked private or local image URL address: ${address}`)
+  // Return the first resolved IP so the caller can pin it in the fetch URL, closing the DNS rebinding window.
+  return addresses[0]?.address
+}
+
+function buildIpPinnedUrl(url: URL, ip: string): URL {
+  // For IPv6, the hostname must be bracketed in the URL.
+  const bracketed = ip.includes(':') ? `[${ip}]` : ip
+  const pinned = new URL(url.toString())
+  pinned.hostname = bracketed
+  return pinned
 }
 
 function isPrivateAddress(address: string): boolean {

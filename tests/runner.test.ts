@@ -295,26 +295,23 @@ describe('workflow runner and queue', () => {
     storage.close()
   })
 
-  it('aborts the active OpenCode session when a run is cancelled', async () => {
-    let abortCalls = 0
+  it('cancels an in-flight OpenCode request via AbortController without disrupting the shared session', async () => {
+    let messageStarted = 0
+    let abortEndpointHit = false
     const server = createServer(async (req, res) => {
       if (req.method === 'POST' && req.url === '/session/session-cancel/message') {
+        messageStarted += 1
+        // Hold the response long enough for the cancellation to fire.
         await new Promise((resolve) => setTimeout(resolve, 900))
         if (!res.destroyed) {
           res.setHeader('content-type', 'application/json')
-          res.end(JSON.stringify({
-            info: {
-              structured: {
-                subject: 'late',
-                finalPrompt: 'late'
-              }
-            }
-          }))
+          res.end(JSON.stringify({ info: { structured: { subject: 'late', finalPrompt: 'late' } } }))
         }
         return
       }
       if (req.method === 'POST' && req.url === '/session/session-cancel/abort') {
-        abortCalls += 1
+        // cancel() no longer calls abortSession — this endpoint must NOT be hit.
+        abortEndpointHit = true
         res.setHeader('content-type', 'application/json')
         res.end('true')
         return
@@ -327,23 +324,21 @@ describe('workflow runner and queue', () => {
     const graph = createStarterGraph()
     const promptNode = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
     const runner = new WorkflowRunner(storage, makeRuntimeConfig(dir, {
-      openCode: {
-        baseUrl: `http://127.0.0.1:${port}`,
-        sessionId: 'session-cancel'
-      }
+      openCode: { baseUrl: `http://127.0.0.1:${port}`, sessionId: 'session-cancel' }
     }))
     const run = await storage.enqueueRun(graph, promptNode.id)
     const execution = runner.execute(run, 'opencode-cancel-worker')
     let cancelPromise: Promise<boolean> | undefined
-    setTimeout(() => {
-      cancelPromise = runner.cancel(run.id)
-    }, 80)
+    setTimeout(() => { cancelPromise = runner.cancel(run.id) }, 80)
     const cancelled = await execution
     while (!cancelPromise) await new Promise((resolve) => setTimeout(resolve, 5))
     await cancelPromise
 
     expect(cancelled.status).toBe('cancelled')
-    expect(abortCalls).toBe(1)
+    // The message endpoint was reached (request started), proving the run reached the OpenCode call.
+    expect(messageStarted).toBeGreaterThanOrEqual(1)
+    // The shared session-level abort endpoint must NOT be called — cancellation is per-run via AbortController.
+    expect(abortEndpointHit).toBe(false)
     storage.close()
   })
 

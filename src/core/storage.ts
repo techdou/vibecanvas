@@ -53,6 +53,10 @@ export class WorkspaceStorage {
     this.initializing ??= this.initialize()
     try {
       await this.initializing
+    } catch (error) {
+      // Clear the rejected promise so a transient failure does not permanently brick the instance.
+      this.initializing = undefined
+      throw error
     } finally {
       if (this.initialized) this.initializing = undefined
     }
@@ -98,6 +102,11 @@ export class WorkspaceStorage {
         seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, event_json TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, seq);
+      CREATE TABLE IF NOT EXISTS run_snapshots (
+        run_id TEXT NOT NULL, seq INTEGER NOT NULL, status TEXT NOT NULL, run_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES runs(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_run_snapshots_run ON run_snapshots(run_id, seq);
       CREATE TABLE IF NOT EXISTS cache (
         cache_key TEXT PRIMARY KEY, value_json TEXT NOT NULL, created_at TEXT NOT NULL
       );
@@ -266,29 +275,38 @@ export class WorkspaceStorage {
   }
 
   async artifactLineage(id: string): Promise<ArtifactLineage> {
-    const all = await this.listArtifacts({ limit: 5000 })
-    const artifact = all.find((item) => item.id === id)
-    if (!artifact) throw new Error(`Artifact not found: ${id}`)
-    const byId = new Map(all.map((item) => [item.id, item]))
-    const ancestors: ArtifactRef[] = []
-    const descendants: ArtifactRef[] = []
-    const seenA = new Set<string>()
-    const visitA = (current: ArtifactRef) => {
-      for (const parentId of current.parentArtifactIds) {
-        if (seenA.has(parentId)) continue
-        seenA.add(parentId)
-        const parent = byId.get(parentId)
-        if (parent) { ancestors.push(parent); visitA(parent) }
-      }
-    }
-    const seenD = new Set<string>()
-    const visitD = (parentId: string) => {
-      for (const child of all.filter((item) => item.parentArtifactIds.includes(parentId))) {
-        if (seenD.has(child.id)) continue
-        seenD.add(child.id); descendants.push(child); visitD(child.id)
-      }
-    }
-    visitA(artifact); visitD(artifact.id)
+    await this.init()
+    const db = this.requireDb()
+    const artifactRow = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(id) as DbRow | undefined
+    if (!artifactRow) throw new Error(`Artifact not found: ${id}`)
+    const artifact = rowToArtifact(artifactRow)
+
+    // Recursive CTE walks the parent_ids_json edge list in SQL instead of loading the full table.
+    const ancestorRows = db.prepare(`
+      WITH RECURSIVE lineage(current_id) AS (
+        SELECT je.value FROM artifacts a, json_each(a.parent_ids_json) AS je WHERE a.id = ?
+        UNION
+        SELECT je.value FROM lineage
+        JOIN artifacts a ON a.id = lineage.current_id
+        JOIN json_each(a.parent_ids_json) AS je
+      )
+      SELECT DISTINCT a.* FROM lineage JOIN artifacts a ON a.id = lineage.current_id
+    `).all(id) as DbRow[]
+    const ancestors = ancestorRows.map(rowToArtifact)
+
+    const descendantRows = db.prepare(`
+      WITH RECURSIVE lineage(descendant_id) AS (
+        SELECT a.id FROM artifacts a WHERE EXISTS (SELECT 1 FROM json_each(a.parent_ids_json) AS je WHERE je.value = ?)
+        UNION
+        SELECT child.id FROM lineage
+        JOIN artifacts child ON EXISTS (
+          SELECT 1 FROM json_each(child.parent_ids_json) AS je WHERE je.value = lineage.descendant_id
+        )
+      )
+      SELECT DISTINCT a.* FROM lineage JOIN artifacts a ON a.id = lineage.descendant_id
+    `).all(id) as DbRow[]
+    const descendants = descendantRows.map(rowToArtifact)
+
     return { artifact, ancestors, descendants }
   }
 
@@ -330,11 +348,14 @@ export class WorkspaceStorage {
       if (currentWorker && run.workerId && currentWorker !== run.workerId) throw new RunStateConflictError(`Run ${run.id} is owned by worker ${currentWorker}, not ${run.workerId}.`)
       if (currentStatus === 'queued' && run.status === 'running' && currentWorker && currentWorker !== run.workerId) throw new RunStateConflictError(`Queued run ${run.id} cannot be resumed by ${run.workerId || 'an unknown worker'}.`)
       run.updatedAt = nowIso()
-      db.prepare(`UPDATE runs SET status=?, started_at=?, completed_at=?, attempts=?, max_attempts=?, estimated_cost=?, actual_cost=?,
+      db.prepare(`UPDATE runs SET status=?, queued_at=?, started_at=?, completed_at=?, attempts=?, max_attempts=?, estimated_cost=?, actual_cost=?,
         worker_id=?, lock_expires_at=?, run_json=?, updated_at=? WHERE id=?`).run(
-        run.status, run.startedAt ?? null, run.completedAt ?? null, run.attempts, run.maxAttempts, run.estimatedCostUsd, run.actualCostUsd,
+        run.status, run.queuedAt, run.startedAt ?? null, run.completedAt ?? null, run.attempts, run.maxAttempts, run.estimatedCostUsd, run.actualCostUsd,
         run.workerId ?? null, run.lockExpiresAt ?? null, JSON.stringify(run), run.updatedAt, run.id
       )
+      const snapshotSeq = Number((db.prepare('SELECT COALESCE(MAX(seq), 0) AS max_seq FROM run_snapshots WHERE run_id = ?').get(run.id) as DbRow).max_seq) + 1
+      db.prepare('INSERT INTO run_snapshots(run_id, seq, status, run_json, created_at) VALUES(?,?,?,?,?)')
+        .run(run.id, snapshotSeq, run.status, JSON.stringify(run), run.updatedAt)
     })
   }
 
@@ -414,25 +435,29 @@ export class WorkspaceStorage {
     delete run.nodeRuns[nodeId]
     run.queuedAt = nowIso()
     await this.saveRun(run)
-    this.requireDb().prepare("UPDATE runs SET status='queued', queued_at=?, worker_id=NULL, lock_expires_at=NULL, run_json=?, updated_at=? WHERE id=?")
-      .run(run.queuedAt, JSON.stringify(run), nowIso(), run.id)
     return run
   }
 
   async recoverExpiredRuns(): Promise<number> {
-    const db = this.requireDb()
-    const rows = db.prepare("SELECT run_json FROM runs WHERE status='running' AND (lock_expires_at IS NULL OR lock_expires_at < ?)").all(nowIso()) as DbRow[]
-    let count = 0
-    for (const row of rows) {
-      const run = parseJson(row.run_json) as WorkflowRun
-      run.workerId = undefined; run.lockExpiresAt = undefined; run.updatedAt = nowIso()
-      if (run.attempts < run.maxAttempts) { run.status = 'queued'; run.queuedAt = nowIso(); run.error = 'Recovered after an expired worker lease.' }
-      else { run.status = 'failed'; run.completedAt = nowIso(); run.error = 'Run failed after worker crash recovery exhausted retries.' }
-      db.prepare('UPDATE runs SET status=?, queued_at=?, completed_at=?, worker_id=NULL, lock_expires_at=NULL, run_json=?, updated_at=? WHERE id=?')
-        .run(run.status, run.queuedAt, run.completedAt ?? null, JSON.stringify(run), run.updatedAt, run.id)
-      count += 1
-    }
-    return count
+    // Do NOT call this.init() here — recoverExpiredRuns is invoked from within initialize(),
+    // so init() would re-await the in-flight initialization promise and deadlock. Every other
+    // public method calls init(); this one is called only after the DB is guaranteed open.
+    if (!this.db) return 0
+    return this.transaction(() => {
+      const db = this.requireDb()
+      const rows = db.prepare("SELECT run_json FROM runs WHERE status='running' AND (lock_expires_at IS NULL OR lock_expires_at < ?)").all(nowIso()) as DbRow[]
+      let count = 0
+      for (const row of rows) {
+        const run = parseJson(row.run_json) as WorkflowRun
+        run.workerId = undefined; run.lockExpiresAt = undefined; run.updatedAt = nowIso()
+        if (run.attempts < run.maxAttempts) { run.status = 'queued'; run.queuedAt = nowIso(); run.error = 'Recovered after an expired worker lease.' }
+        else { run.status = 'failed'; run.completedAt = nowIso(); run.error = 'Run failed after worker crash recovery exhausted retries.' }
+        db.prepare("UPDATE runs SET status=?, queued_at=?, completed_at=?, worker_id=NULL, lock_expires_at=NULL, run_json=?, updated_at=? WHERE id=? AND status='running'")
+          .run(run.status, run.queuedAt, run.completedAt ?? null, JSON.stringify(run), run.updatedAt, run.id)
+        count += 1
+      }
+      return count
+    })
   }
 
   async appendRunEvent(event: RunEvent): Promise<void> {
@@ -511,7 +536,7 @@ export class WorkspaceStorage {
 
   private requireDb(): DatabaseSyncType { if (!this.db) throw new Error('WorkspaceStorage is not initialized.'); return this.db }
 
-  private transaction<T>(work: () => T): T {
+  private transaction<T>(work: () => T extends Promise<unknown> ? never : T): T {
     const db = this.requireDb(); db.exec('BEGIN IMMEDIATE')
     try { const value = work(); db.exec('COMMIT'); return value } catch (error) { try { db.exec('ROLLBACK') } catch { /* ignore */ }; throw error }
   }
