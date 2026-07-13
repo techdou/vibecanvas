@@ -1,143 +1,170 @@
-# VibeCanvas 2.0
+# VibeCanvas
 
-VibeCanvas is a local-first, Agent-native visual creation studio. It combines a freeform infinite canvas, a typed ComfyUI-style semantic workflow, OpenCode/MCP orchestration, and an OpenAI-compatible Image 2 provider.
+> Local-first, Agent-native visual creation studio — infinite canvas + typed workflow + MCP orchestration + OpenAI-compatible image provider.
 
-The project is designed for agents that do not have a built-in image model. OpenCode, Codex, Claude Code, OpenClaw, or another MCP-capable host can design and execute workflows while the configured Image 2 relay produces the actual images.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-brightgreen)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)](https://www.typescriptlang.org/)
+[![Tests: 40 passed](https://img.shields.io/badge/tests-40%20passed-brightgreen)](#test-status)
 
-## What changed in 2.0
+VibeCanvas combines a freeform infinite canvas, a typed ComfyUI-style semantic workflow, OpenCode/MCP orchestration, and an OpenAI-compatible Image provider — designed for AI coding agents (OpenCode, Codex, Claude Code, etc.) that don't have a built-in image model.
 
-V2 is a data and execution redesign rather than a UI-only update:
+---
 
-- SQLite database with WAL, indexes, transactions, and crash recovery;
-- optimistic graph revisions and atomic Graph Patch transactions;
-- immutable run snapshots separated from the editable design graph;
-- lease-based asynchronous run queue with persisted events;
-- cancellation propagated to Image API, downloads, retry sleeps, and OpenCode;
-- current OpenCode `info.structured` contract and real image-file Vision Review;
-- persistent Artifact states: draft, candidate, selected, final, archived;
-- true in-place replacement and branch-preserving canvas output;
-- Candidate Selector that pauses and resumes a run;
-- annotation editor, Mask Editor, Artifact lineage tree, templates, and subworkflows;
-- provider capabilities, custom request/download headers, cost table, and safety controls;
-- one shared user configuration for Web, CLI, and MCP;
-- 21 MCP tools and asynchronous run semantics.
+## Table of contents
 
-## Product model
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [OpenCode integration](#opencode-integration)
+- [MCP tools](#mcp-tools)
+- [Project structure](#project-structure)
+- [Development](#development)
+- [Testing](#testing)
+- [Security](#security)
+- [License](#license)
+
+---
+
+## Overview
+
+VibeCanvas is **not** a wrapper around a specific image API. It's a local-first canvas + typed workflow executor that lets any MCP-capable AI agent design and run visual creation pipelines. The agent reasons at the semantic level (prompt architect, vision review, candidate selection); an external image relay does the actual rendering.
 
 ```text
 Freeform canvas + typed workflow
             ↓
 Agent Prompt Architect / Agent Vision Review
             ↓
-Image 2 generate or edit provider
+Image generate or edit (OpenAI-compatible API)
             ↓
-Candidate Selector / technical gate
+Candidate Selector / quality gate
             ↓
 Artifact lineage + final status
             ↓
 Place beside, below, or replace in place
 ```
 
-VibeCanvas uses semantic creative nodes rather than diffusion-internal Checkpoint/VAE/Sampler nodes. It is therefore suitable for hosted image APIs while remaining extensible to future providers.
+VibeCanvas uses semantic creative nodes rather than diffusion-internal Checkpoint/VAE/Sampler nodes, making it suitable for hosted image APIs while remaining extensible.
 
-## Main capabilities
+## Architecture
 
-### Unified infinite canvas
+Four layers with strict one-way dependencies — no circular imports, no layer leakage:
 
-- free, workflow, and hybrid modes;
-- images, notes, annotations, masks, nodes, connections, and previews in one coordinate system;
-- strong port types and cycle prevention;
-- revisions, restore history, templates, and subworkflows;
-- partial execution to a selected node.
+```text
+src/web   (React + React Flow, browser SPA)
+   │  imports core types only; talks to server via fetch + WebSocket
+   ▼
+src/server (Express + ws)  ──┐
+   │  wraps core into HTTP/WS │  Two independent processes sharing
+   ▼                          │  the same SQLite WAL + Artifact files
+src/mcp   (MCP stdio)     ──┘
+   │  wraps core into MCP tools
+   ▼
+src/core  (pure business logic — no React/Express/MCP dependencies)
+```
+
+**Key design decisions:**
+
+- **Graph patch transactions** — every canvas mutation goes through `apply_graph_patch` with optimistic revision CAS (double-checked in memory + SQL `WHERE revision=?`)
+- **Immutable run snapshots** — each run deep-clones the graph at enqueue time; runners never see live edits
+- **Lease-based queue** — async run queue with heartbeat, crash recovery, and cancellation propagated to fetch/sleep/OpenCode
+- **AbortController end-to-end** — from user cancel → DB status → in-flight API call
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component view.
+
+## Features
+
+### Infinite canvas
+
+- Free, workflow, and hybrid modes
+- Images, notes, annotations, masks, nodes, connections, and previews in one coordinate system
+- Strong port types with 14 typed ports and cycle prevention
+- Revision history, templates, and subworkflows
+- Partial execution to a selected node
 
 ### Image creation
 
-- `/images/generations` and multipart `/images/edits`;
-- text-to-image, source image, multiple references, annotation image, and alpha mask;
-- Base64 or URL responses;
-- custom endpoint paths, model aliases, JSON fields, request headers, and download headers;
-- output normalization to PNG/JPEG/WebP;
-- timeout, retry, URL/SSRF guard, size validation, ratio validation, and SHA-256.
+- OpenAI-compatible `/images/generations` and multipart `/images/edits`
+- Text-to-image, source image, multiple references, annotation image, and alpha mask
+- Base64 or URL responses with SSRF protection (DNS-rebinding hardened via IP pinning)
+- Custom endpoint paths, model aliases, request/download headers
+- Output normalization to PNG/JPEG/WebP
+- Timeout, retry, size validation, ratio validation, and SHA-256 hashing
 
 ### Agent collaboration
 
-- OpenCode Structured Output Prompt Architect;
-- Agent Vision Review receives the actual candidate files, not filenames alone;
-- deterministic local fallback for workflows that do not require an Agent;
-- MCP graph patching, artifact inspection, run control, and candidate resolution;
-- Skills for routing, composing, generating, editing, and reviewing.
+- OpenCode Structured Output Prompt Architect
+- Agent Vision Review receives actual candidate files (not filenames)
+- Deterministic local fallback for workflows that don't need an Agent
+- 21 MCP tools for graph patching, artifact inspection, run control, and candidate resolution
+- Skills for routing, composing, generating, editing, and reviewing
 
 ### Reliability
 
-- SQLite WAL allows Web and MCP processes to share the same project safely;
-- all design changes require the current `baseRevision`;
-- runners execute immutable graph snapshots and do not overwrite live canvas edits;
-- queued and running work has leases and is recovered after restart;
-- cancelled operations do not register or place new Artifacts;
-- run events and cost estimates are persisted.
+- SQLite WAL allows Web and MCP processes to share the same project safely
+- Periodic recovery of expired run leases (every 10s, not just at startup)
+- Run snapshot audit trail (`run_snapshots` table)
+- Cancelled operations propagate to subflow children — no orphaned runs burning API budget
+- Persisted run events and cost estimates
 
-## Requirements
+## Quick start
 
-- Node.js 22.5 or later. VibeCanvas uses the built-in `node:sqlite` API.
-- npm.
-- An OpenAI-compatible image relay for generation.
-- OpenCode server only when OpenCode Prompt Architect or Agent Vision Review is enabled.
+### Prerequisites
 
-`node:sqlite` may print an ExperimentalWarning on some Node 22 builds. VibeCanvas requires the API but does not treat that warning as a failure.
+- **Node.js ≥ 22.5** (uses built-in `node:sqlite`)
+- **npm**
+- An OpenAI-compatible image relay for generation
+- OpenCode server (optional — only for Agent Prompt Architect / Vision Review)
 
-## Install
+### Install
 
 ```bash
+git clone https://github.com/techdou/vibecanvas.git
+cd vibecanvas
 npm install
 npm run build
 npm run doctor
 ```
 
-Development:
+### Development
 
 ```bash
 npm run dev
 ```
 
-Production:
+This starts both the API server (tsx watch) and the web dev server (Vite) concurrently.
+
+| URL | Description |
+|---|---|
+| `http://127.0.0.1:5173` | Development web UI (Vite) |
+| `http://127.0.0.1:43120` | Production web UI (after `npm start`) |
+
+### Open a specific project
 
 ```bash
-npm run build
-npm start
-```
-
-Default URLs:
-
-```text
-Development Web: http://127.0.0.1:5173
-Production Web:  http://127.0.0.1:43120
-```
-
-Open a specific user project:
-
-```bash
+# Linux / macOS
 VIBECANVAS_PROJECT_DIR=/path/to/project npm start
-```
 
-PowerShell:
-
-```powershell
+# PowerShell
 $env:VIBECANVAS_PROJECT_DIR="D:\Projects\visual-project"
 npm start
 ```
 
-## Shared configuration
+## Configuration
 
-V2 does not require a separate `.env` in every user project. Web, CLI, and MCP read the same configuration file.
+V2 uses **one shared config file** for Web, CLI, and MCP — no per-project `.env` required.
 
 ```text
 Linux/macOS: ~/.config/vibecanvas/config.json
 Windows:     %APPDATA%\VibeCanvas\config.json
 ```
 
-The application creates it automatically. Provider Settings in the Web UI can update the active profile. Restart Web and MCP processes after changing a profile.
+The application creates it automatically on first run. Provider Settings in the Web UI can update the active profile.
 
-Minimal profile:
+<details>
+<summary>Minimal config example</summary>
 
 ```json
 {
@@ -146,10 +173,10 @@ Minimal profile:
   "providers": {
     "my-relay": {
       "id": "my-relay",
-      "label": "My Image 2 Relay",
+      "label": "My Image Relay",
       "apiKey": "YOUR_TOKEN",
       "baseUrl": "https://relay.example/v1",
-      "model": "gpt-image-2",
+      "model": "gpt-image-1",
       "generatePath": "/images/generations",
       "editPath": "/images/edits",
       "timeoutMs": 180000,
@@ -173,13 +200,7 @@ Minimal profile:
         "maxReferences": 10,
         "maxCandidates": 4
       },
-      "costs": {
-        "low": 0,
-        "medium": 0,
-        "high": 0,
-        "auto": 0,
-        "editMultiplier": 1
-      }
+      "costs": { "low": 0, "medium": 0, "high": 0, "auto": 0, "editMultiplier": 1 }
     }
   },
   "openCode": {
@@ -195,17 +216,17 @@ Minimal profile:
 }
 ```
 
-Environment overrides are documented in `.env.example`.
+</details>
 
-Connectivity probe, which makes a real low-quality generation request and may incur cost:
+Environment variable overrides are documented in [`.env.example`](.env.example).
+
+**Connectivity probe** (makes a real low-quality generation request, may incur cost):
 
 ```bash
 npm run doctor -- --probe-provider
 ```
 
 ## OpenCode integration
-
-Start OpenCode Server:
 
 ```bash
 opencode serve \
@@ -219,99 +240,114 @@ Install project-local Skills and write MCP configuration:
 
 ```bash
 npm run install:skills -- \
-  --project /absolute/path/to/user/project \
+  --project /absolute/path/to/project \
   --write-opencode
 ```
 
-The generated MCP entry passes both:
+<details>
+<summary>Recommended Agent prompt</summary>
+
+> Read the current VibeCanvas selection. Build a three-candidate Image workflow with Prompt Architect, Agent Vision Review, human selection, and final canvas output. Use transactional graph patches. Start the run asynchronously and poll its status.
+
+</details>
+
+## MCP tools
+
+The MCP server exposes 21 tools. Key flows:
 
 ```text
-VIBECANVAS_PROJECT_DIR
-VIBECANVAS_CONFIG_FILE
+start_run / run_to_node  →  runId
+get_run_status           →  queued / running / needs-input / completed
+resolve_human_selection  →  requeue paused run
+cancel_run               →  propagate cancellation (including subflow children)
 ```
 
-Open a new OpenCode conversation after installation so the Skill and MCP schemas reload.
+Full tool reference: [`docs/MCP.md`](docs/MCP.md).
 
-Recommended request:
+## Project structure
 
 ```text
-Read the current VibeCanvas selection. Build a three-candidate Image 2 workflow with Prompt Architect, Agent Vision Review, human selection, and final canvas output. Use transactional graph patches. Start the run asynchronously and poll its status.
+vibecanvas/
+├── src/
+│   ├── core/              # Pure business logic (no framework deps)
+│   │   ├── types.ts       # All domain models
+│   │   ├── storage.ts     # SQLite persistence + immutable snapshots
+│   │   ├── runner.ts      # Workflow execution engine
+│   │   ├── run-queue.ts   # Async queue with lease + recovery
+│   │   ├── graph.ts       # Graph validation + patch + topology
+│   │   ├── image-provider.ts  # OpenAI-compatible adapter + SSRF guard
+│   │   ├── node-registry.ts   # Node type definitions
+│   │   └── ...
+│   ├── server/            # Express HTTP + WebSocket
+│   ├── mcp/               # MCP stdio tools
+│   └── web/               # React + React Flow SPA
+│       ├── App.tsx
+│       ├── components/
+│       └── lib/api.ts
+├── tests/                 # Vitest — 40 tests
+├── docs/                  # Architecture, MCP, Security, etc.
+├── skills/                # Agent skills (generate, edit, review, compose)
+├── scripts/               # doctor, install-skills, probe-mcp, release
+├── examples/              # Sample workflows + config
+├── package.json
+└── tsconfig.json
 ```
 
-## Asynchronous MCP run flow
-
-Do not wait synchronously inside `run_graph` or `run_to_node`.
-
-```text
-start_run / run_to_node
-    → runId
-get_run_status / get_run_events
-    → queued / running / needs-input / completed
-resolve_human_selection
-    → requeue paused run
-cancel_run
-    → propagate cancellation
-```
-
-The MCP server currently exposes 21 tools. See `docs/MCP.md`.
-
-## Project data
-
-Each user project receives:
+Each user project generates a `.vibecanvas/` data directory (gitignored):
 
 ```text
 <project>/.vibecanvas/
-├── vibecanvas.db
+├── vibecanvas.db          # SQLite (graphs, runs, artifacts, events, cache)
 ├── vibecanvas.db-wal
 ├── vibecanvas.db-shm
-├── artifacts/
+├── artifacts/             # Image files referenced by Artifact IDs
 ├── uploads/
 ├── runs/
 ├── cache/
 └── exports/
 ```
 
-SQLite stores graph revisions, selection, Artifact index, lineage, immutable runs, node outputs, events, cache metadata, and templates. Large image bytes remain project-local files referenced by Artifact IDs.
-
-Legacy v1 JSON files are imported when present; v2 thereafter treats SQLite as the source of truth. See `docs/MIGRATION_V1_TO_V2.md` before upgrading an important project.
-
-## Scripts
+## Development
 
 ```bash
-npm run typecheck
-npm test
-npm run build
-npm run probe:mcp
-npm run quality
+npm run typecheck     # tsc --noEmit
+npm test              # vitest run
+npm run build         # tsup (server/mcp/cli) + vite (web)
+npm run probe:mcp     # MCP stdio tool probe
+npm run quality       # typecheck + test + build + probe
 npm audit --omit=dev
-npm run package:release
 ```
 
-`package:release` creates a cross-platform source-and-build ZIP without `.git`, `node_modules`, secrets, or user project data.
+## Testing
 
-## Test status
+The quality gate covers:
 
-The release quality gate covers:
+- Graph type checking, cycle prevention, revisions, invalid targets
+- Same-process and multi-connection SQLite concurrency
+- Immutable run snapshots and lease recovery
+- OpenCode `info.structured` contract and real Vision Review file attachments
+- Image API Base64/URL responses, headers, retries, cancellation, SSRF, masks
+- Candidate Selector pause/resume, final status, true replacement, subworkflows
+- zod-validated server routes
+- Production Node/Web build and MCP stdio probe
 
-- graph type checking, cycle prevention, revisions, and invalid targets;
-- same-process and multi-connection SQLite concurrency;
-- immutable run snapshots and lease recovery;
-- OpenCode `info.structured` and real Vision Review file attachments;
-- Image API Base64/URL responses, headers, retries, cancellation, SSRF, and masks;
-- Candidate Selector pause/resume, final status, true replacement, and subworkflows;
-- asynchronous HTTP and MCP interfaces;
-- production Node/Web build and MCP stdio probe.
+```bash
+npm test    # 40 tests, ~4s
+```
 
-See `REVIEW.md` for exact results and remaining verification boundaries.
+See [`REVIEW.md`](REVIEW.md) for detailed test boundaries.
 
-## Design inspiration and independence
+## Security
 
-VibeCanvas was inspired by Cowart's project-local canvas, selection-driven image creation, annotation revision, and Agent/MCP interaction model. It is not a Cowart fork and does not reuse Cowart's tldraw records, MCP Widget bridge, source names, or insertion implementation. VibeCanvas independently uses React Flow, SQLite, a typed DAG, asynchronous runners, and an external Image 2 provider. See `docs/DESIGN_INSPIRATION.md`.
+VibeCanvas is **local-first** and binds to localhost by default. It is not a ready-made public multi-tenant service.
 
-## Security posture
+- API keys live in the shared config file or environment variables — **never** in graph JSON, prompts, run metadata, or browser storage
+- Image download URLs pass through SSRF validation: protocol whitelist, private-IP rejection, DNS-rebinding-hardened IP pinning, 80 MB limit, 3-redirect cap
+- Server routes zod-validate request bodies
+- `.gitignore` excludes `.env`, `config.json`, and IDE directories
 
-VibeCanvas is local-first and binds to localhost by default. It is not a ready-made public multi-tenant service. Review `docs/SECURITY.md` before exposing it to a network.
+Review [`docs/SECURITY.md`](docs/SECURITY.md) before exposing VibeCanvas to a network.
 
 ## License
 
-MIT. Third-party dependencies retain their respective licenses.
+[MIT](LICENSE). Third-party dependencies retain their respective licenses.
