@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "vibecanvas": {
+      "type": "local",
+      "command": [
+        "node",
+        "/absolute/path/to/vibecanvas/dist/node/mcp.js"
+      ],
+      "cwd": "/absolute/path/to/your-project",
+      "enabled": true,
+      "environment": {
+        "VIBECANVAS_PROJECT_DIR": "/absolute/path/to/your-project",
+        "VIBECANVAS_CONFIG_FILE": "/absolute/path/to/shared/vibecanvas/config.json"
+      }
+    }
+  }
+}

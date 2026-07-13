@@ -1,0 +1,197 @@
+{
+  "schemaVersion": "2.0",
+  "id": "main",
+  "revision": 0,
+  "name": "VibeCanvas 主画布",
+  "description": "Agent 原生视觉创作与节点工作流示例。",
+  "mode": "hybrid",
+  "nodes": [
+    {
+      "id": "node-0SCwHZ9-",
+      "type": "workflow",
+      "position": {
+        "x": 40,
+        "y": 80
+      },
+      "data": {
+        "nodeType": "input.brief",
+        "config": {
+          "text": "为个人知识分享品牌设计一个辨识度高、适合头像与网页使用的视觉 IP。"
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-7Mw5feAZ",
+      "type": "workflow",
+      "position": {
+        "x": 390,
+        "y": 80
+      },
+      "data": {
+        "nodeType": "agent.prompt-architect",
+        "config": {
+          "strategy": "dynamic",
+          "extraConstraints": "",
+          "useOpenCode": true
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-GYnVvrFw",
+      "type": "workflow",
+      "position": {
+        "x": 390,
+        "y": 360
+      },
+      "data": {
+        "nodeType": "utility.aspect-ratio",
+        "config": {
+          "width": 1024,
+          "height": 1024
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-tyErcIH9",
+      "type": "workflow",
+      "position": {
+        "x": 760,
+        "y": 80
+      },
+      "data": {
+        "nodeType": "image.generate",
+        "config": {
+          "quality": "high",
+          "candidateCount": 3,
+          "outputFormat": "png"
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-W4e0AUFv",
+      "type": "workflow",
+      "position": {
+        "x": 1130,
+        "y": 80
+      },
+      "data": {
+        "nodeType": "review.quality",
+        "config": {
+          "minimumScore": 70,
+          "reviewMode": "hybrid"
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-qj7-e0zt",
+      "type": "workflow",
+      "position": {
+        "x": 1460,
+        "y": 80
+      },
+      "data": {
+        "nodeType": "control.human-select",
+        "config": {
+          "selectedArtifactId": "",
+          "autoSelectSingle": true
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-SyK8PS3I",
+      "type": "workflow",
+      "position": {
+        "x": 1790,
+        "y": 80
+      },
+      "data": {
+        "nodeType": "output.canvas",
+        "config": {
+          "placement": "right",
+          "replaceNodeId": "",
+          "markFinal": true
+        },
+        "status": "idle"
+      }
+    },
+    {
+      "id": "node-Txl8WLHW",
+      "type": "workflow",
+      "position": {
+        "x": 40,
+        "y": 430
+      },
+      "data": {
+        "nodeType": "canvas.note",
+        "config": {
+          "text": "自由画布元素只有被工作流连接时才参与执行。运行状态保存在 Run Snapshot，不会覆盖正在编辑的设计图。"
+        },
+        "status": "idle"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-_HQHGm8G",
+      "source": "node-0SCwHZ9-",
+      "target": "node-7Mw5feAZ",
+      "sourceHandle": "text",
+      "targetHandle": "brief"
+    },
+    {
+      "id": "edge-xOIcEvIT",
+      "source": "node-7Mw5feAZ",
+      "target": "node-tyErcIH9",
+      "sourceHandle": "promptSpec",
+      "targetHandle": "prompt"
+    },
+    {
+      "id": "edge-KWnQwrl8",
+      "source": "node-GYnVvrFw",
+      "target": "node-tyErcIH9",
+      "sourceHandle": "ratio",
+      "targetHandle": "size"
+    },
+    {
+      "id": "edge-nupVHPSA",
+      "source": "node-tyErcIH9",
+      "target": "node-W4e0AUFv",
+      "sourceHandle": "images",
+      "targetHandle": "images"
+    },
+    {
+      "id": "edge-qcoP4Fno",
+      "source": "node-0SCwHZ9-",
+      "target": "node-W4e0AUFv",
+      "sourceHandle": "text",
+      "targetHandle": "brief"
+    },
+    {
+      "id": "edge-vHZgIyi3",
+      "source": "node-W4e0AUFv",
+      "target": "node-qj7-e0zt",
+      "sourceHandle": "images",
+      "targetHandle": "images"
+    },
+    {
+      "id": "edge-UxZ-lGst",
+      "source": "node-qj7-e0zt",
+      "target": "node-SyK8PS3I",
+      "sourceHandle": "selected",
+      "targetHandle": "image"
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.72
+  },
+  "createdAt": "2026-07-13T02:49:10.961Z",
+  "updatedAt": "2026-07-13T02:49:10.961Z"
+}
