@@ -20,6 +20,7 @@ for (const name of ['vibecanvas', 'vibecanvas-workflow-compose', 'vibecanvas-ima
   console.log(`Installed ${name} -> ${path.join(target, name)}`)
 }
 
+// --- OpenCode MCP config ---
 if (args.includes('--write-opencode')) {
   const configPath = path.join(projectDir, 'opencode.json')
   let config: Record<string, unknown> = { $schema: 'https://opencode.ai/config.json' }
@@ -33,6 +34,45 @@ if (args.includes('--write-opencode')) {
     environment: { VIBECANVAS_PROJECT_DIR: projectDir, VIBECANVAS_CONFIG_FILE: defaultConfigPath() }
   }
   config.mcp = mcp
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+  console.log(`Updated ${configPath}`)
+}
+
+// --- ZCode MCP config ---
+// ZCode reads <repo>/.zcode/config.json → mcp.servers and auto-connects at session start.
+// Skills are discovered from .agents/skills (installed above) or .zcode/skills.
+if (args.includes('--write-zcode')) {
+  const configPath = path.join(projectDir, '.zcode', 'config.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(await readFile(configPath, 'utf8')) } catch { /* create */ }
+  const mcp = (config.mcp && typeof config.mcp === 'object' ? config.mcp : {}) as Record<string, unknown>
+  const servers = (mcp.servers && typeof mcp.servers === 'object' ? mcp.servers : {}) as Record<string, unknown>
+  servers.vibecanvas = {
+    type: 'stdio',
+    command: 'node',
+    args: [path.resolve('dist/node/mcp.js')],
+    env: { VIBECANVAS_PROJECT_DIR: projectDir, VIBECANVAS_CONFIG_FILE: defaultConfigPath() }
+  }
+  mcp.servers = servers
+  config.mcp = mcp
+  await mkdir(path.dirname(configPath), { recursive: true })
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+  console.log(`Updated ${configPath}`)
+}
+
+// --- Claude Code MCP config (.mcp.json) ---
+if (args.includes('--write-claude-code')) {
+  const configPath = path.join(projectDir, '.mcp.json')
+  let config: Record<string, unknown> = {}
+  try { config = JSON.parse(await readFile(configPath, 'utf8')) } catch { /* create */ }
+  const mcpServers = (config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers : {}) as Record<string, unknown>
+  mcpServers.vibecanvas = {
+    type: 'stdio',
+    command: 'node',
+    args: [path.resolve('dist/node/mcp.js')],
+    env: { VIBECANVAS_PROJECT_DIR: projectDir, VIBECANVAS_CONFIG_FILE: defaultConfigPath() }
+  }
+  config.mcpServers = mcpServers
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
   console.log(`Updated ${configPath}`)
 }
