@@ -32,6 +32,12 @@ Desktop.ini
 # VibeCanvas 运行时数据（用户项目本地生成，不属于源码）
 .vibecanvas/
 
+# ZCode 本地工作目录（plan / session 产物）
+.zcode/
+
+# Remotion / 第三方 MCP 本地数据
+.data/
+
 # 环境变量与密钥（只有模板可以提交）
 .env
 .env.local
