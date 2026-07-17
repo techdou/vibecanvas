@@ -13,8 +13,9 @@
     "dev:server": "tsx watch src/server/index.ts",
     "dev:web": "vite --host 127.0.0.1 --port 5173",
     "build": "npm run typecheck && tsup && vite build",
-    "start": "node dist/node/server.js",
-    "mcp": "node dist/node/mcp.js",
+    "start": "node dist/node/cli.js serve",
+    "serve": "node dist/node/cli.js serve",
+    "mcp": "node dist/node/cli.js mcp",
     "cli": "node dist/node/cli.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -24,6 +25,9 @@
     "install:skills": "tsx scripts/install-skills.ts",
     "package:release": "tsx scripts/package-release.ts",
     "probe:mcp": "tsx scripts/probe-mcp.ts"
+  },
+  "bin": {
+    "vibecanvas": "dist/node/cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
