@@ -48,7 +48,7 @@ describe('HTTP server', () => {
     runtimes.push(runtime)
     const graph = await runtime.storage.loadGraph()
     const prompt = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
-    prompt.data.config.useOpenCode = false
+    prompt.data.config.llmEnabled = false
     await runtime.storage.saveGraph(graph, graph.revision, 'server-run')
     await new Promise<void>((resolve) => runtime.server.listen(0, '127.0.0.1', () => resolve()))
     const address = runtime.server.address(); if (!address || typeof address === 'string') throw new Error('No port')

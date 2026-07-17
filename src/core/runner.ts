@@ -11,7 +11,7 @@ import type { RuntimeConfig } from './config.js'
 import { executionNodeIds, topologicalSort, validateGraph } from './graph.js'
 import { getNodeDefinition } from './node-registry.js'
 import { Image2Provider } from './image-provider.js'
-import { OpenCodeBridge, type OpenCodeFilePartInput } from './opencode-bridge.js'
+import { createLLMProvider, type LLMProvider } from './llm-provider.js'
 import { evaluationReportSchema, promptSpecSchema } from './schemas.js'
 import { WorkspaceStorage } from './storage.js'
 import { nowIso, sha256, stableStringify, ensureDir } from './utils.js'
@@ -24,13 +24,15 @@ export class NeedsInputError extends Error {
 
 export class WorkflowRunner extends EventEmitter {
   private readonly imageProvider: Image2Provider
-  private readonly openCode: OpenCodeBridge
+  private readonly architectLLM: LLMProvider
+  private readonly reviewerLLM: LLMProvider
   private readonly activeControllers = new Map<string, AbortController>()
 
   constructor(private readonly storage: WorkspaceStorage, private readonly config: RuntimeConfig) {
     super()
     this.imageProvider = new Image2Provider(config.image, storage)
-    this.openCode = new OpenCodeBridge(config.openCode)
+    this.architectLLM = createLLMProvider(config.llm.architect)
+    this.reviewerLLM = createLLMProvider(config.llm.reviewer)
   }
 
   async execute(run: WorkflowRun, workerId: string, depth = 0): Promise<WorkflowRun> {
@@ -204,8 +206,11 @@ export class WorkflowRunner extends EventEmitter {
     const brief = asString(inputs.brief)
     if (!brief) throw new Error('Prompt 设计节点缺少创作需求。')
     const references = asArtifacts(inputs.references)
-    if (asBoolean(config.useOpenCode) && this.config.openCode.sessionId) {
-      const response = await this.promptArchitectWithOpenCode(brief, config, references, signal)
+    // Use the LLM provider only when the user opts in and the configured provider
+    // is not the deterministic fallback. This keeps a freshly installed instance
+    // (default profile = fallback) on the local heuristic without surprising calls.
+    if (asBoolean(config.llmEnabled, true) && this.architectLLM.kind !== 'fallback') {
+      const response = await this.promptArchitectWithLLM(brief, config, references, signal)
       return { outputs: { promptSpec: response.promptSpec }, actualCostUsd: response.cost }
     }
     return { outputs: { promptSpec: buildPromptSpec(brief, config, references) } }
@@ -277,12 +282,15 @@ export class WorkflowRunner extends EventEmitter {
     const mode = asString(config.reviewMode, 'hybrid')
     const technical = await technicalReview(images, minimumScore)
     if (mode === 'technical') return { outputs: { selected: images[technical.selectedIndex], images, report: technical } }
-    if (!this.config.openCode.sessionId) {
-      if (mode === 'agent') throw new Error('Agent Vision Review requires an OpenCode session ID.')
-      technical.issues.push({ code: 'agent-unavailable', severity: 'warning', message: 'OpenCode session is not configured; used technical review only.' })
+    // LLM semantic review only runs when a non-fallback provider is configured.
+    // Otherwise we degrade to technical-only review with a warning, even when the
+    // user asked for 'agent' mode, so the workflow keeps producing output instead
+    // of hard-failing on an unconfigured LLM profile.
+    if (this.reviewerLLM.kind === 'fallback') {
+      technical.issues.push({ code: 'llm-unavailable', severity: 'warning', message: '未配置 LLM provider，仅执行技术评审。配置 VIBECANVAS_LLM_REVIEWER_* 启用语义评审。' })
       return { outputs: { selected: images[technical.selectedIndex], images, report: technical } }
     }
-    const agent = await this.visionReviewWithOpenCode(images, asString(inputs.brief), minimumScore, signal)
+    const agent = await this.visionReviewWithLLM(images, asString(inputs.brief), minimumScore, signal)
     const report = mode === 'hybrid' ? combineReviews(technical, agent.report, minimumScore) : agent.report
     return { outputs: { selected: images[report.selectedIndex], images, report }, actualCostUsd: agent.cost }
   }
@@ -363,31 +371,30 @@ export class WorkflowRunner extends EventEmitter {
     return artifact
   }
 
-  private async promptArchitectWithOpenCode(brief: string, config: Record<string, unknown>, references: ArtifactRef[], signal: AbortSignal): Promise<{ promptSpec: PromptSpec; cost: number }> {
+  private async promptArchitectWithLLM(brief: string, config: Record<string, unknown>, references: ArtifactRef[], signal: AbortSignal): Promise<{ promptSpec: PromptSpec; cost: number | undefined }> {
     const schema = promptSpecJsonSchema()
     const prompt = [
       'You are the VibeCanvas prompt architect. Return a precise structured visual specification and a production-ready prompt for the active image model.',
       `Creative brief: ${brief}`, `Strategy: ${asString(config.strategy, 'dynamic')}`, `Extra constraints: ${asString(config.extraConstraints)}`,
       `Reference roles: ${references.map((item) => `${item.fileName} (${String(item.metadata?.role ?? 'reference')})`).join('; ') || 'none'}`
     ].join('\n')
-    const files: OpenCodeFilePartInput[] = []
+    const images: Array<{ mime: string; base64: string; filename?: string }> = []
     for (const [index, reference] of references.slice(0, 6).entries()) {
       if (signal.aborted) throw new DOMException('Run cancelled.', 'AbortError')
       const preview = await sharp(reference.filePath).resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 84 }).toBuffer()
-      files.push({ type: 'file', mime: 'image/jpeg', filename: `reference-${index + 1}.jpg`, url: `data:image/jpeg;base64,${preview.toString('base64')}` })
+      images.push({ mime: 'image/jpeg', base64: preview.toString('base64'), filename: `reference-${index + 1}.jpg` })
     }
-    const response = await this.openCode.sendMessage({ parts: [{ type: 'text', text: prompt }, ...files], format: { type: 'json_schema', schema, retryCount: 2 }, signal })
-    const structured = response?.info?.structured ?? response?.info?.structured_output
-    const parsed = promptSpecSchema.safeParse(structured)
-    if (!parsed.success) throw new Error(`OpenCode returned an invalid PromptSpec: ${parsed.error.message}`)
-    return { promptSpec: parsed.data, cost: Number(response?.info?.cost || 0) }
+    const response = await this.architectLLM.generateStructured({ prompt, images, schema, signal })
+    const parsed = promptSpecSchema.safeParse(response.structured)
+    if (!parsed.success) throw new Error(`LLM returned an invalid PromptSpec: ${parsed.error.message}`)
+    return { promptSpec: parsed.data, cost: response.cost }
   }
 
-  private async visionReviewWithOpenCode(images: ArtifactRef[], brief: string, minimumScore: number, signal: AbortSignal): Promise<{ report: EvaluationReport; cost: number }> {
-    const files: OpenCodeFilePartInput[] = []
+  private async visionReviewWithLLM(images: ArtifactRef[], brief: string, minimumScore: number, signal: AbortSignal): Promise<{ report: EvaluationReport; cost: number | undefined }> {
+    const llmImages: Array<{ mime: string; base64: string; filename?: string }> = []
     for (const [index, image] of images.entries()) {
       const preview = await sharp(image.filePath).resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 86 }).toBuffer()
-      files.push({ type: 'file', mime: 'image/jpeg', filename: `candidate-${index + 1}.jpg`, url: `data:image/jpeg;base64,${preview.toString('base64')}` })
+      llmImages.push({ mime: 'image/jpeg', base64: preview.toString('base64'), filename: `candidate-${index + 1}.jpg` })
     }
     const prompt = [
       'You are VibeCanvas Agent Vision Review. Compare every attached candidate image.',
@@ -396,15 +403,13 @@ export class WorkflowRunner extends EventEmitter {
       'Check subject correctness, composition, anatomy and geometry, visible text accuracy, material and lighting coherence, reference adherence, artifacts, watermarks, annotation residue, and suitability for the stated use.',
       'Return the zero-based selectedIndex, a 0-100 score, decision pass/retry/manual, concrete issues, and a targeted repairPrompt when needed.'
     ].join('\n')
-    const response = await this.openCode.sendMessage({
-      parts: [{ type: 'text', text: prompt }, ...files],
-      format: { type: 'json_schema', schema: evaluationJsonSchema(), retryCount: 2 }, signal
+    const response = await this.reviewerLLM.generateStructured({
+      prompt, images: llmImages, schema: evaluationJsonSchema(), signal
     })
-    const structured = response?.info?.structured ?? response?.info?.structured_output
-    const parsed = evaluationReportSchema.safeParse(structured)
-    if (!parsed.success) throw new Error(`OpenCode returned an invalid vision review: ${parsed.error.message}`)
-    if (parsed.data.selectedIndex >= images.length) throw new Error(`OpenCode selected candidate index ${parsed.data.selectedIndex}, but only ${images.length} images exist.`)
-    return { report: { ...parsed.data, reviewer: 'opencode', semanticScore: parsed.data.score }, cost: Number(response?.info?.cost || 0) }
+    const parsed = evaluationReportSchema.safeParse(response.structured)
+    if (!parsed.success) throw new Error(`LLM returned an invalid vision review: ${parsed.error.message}`)
+    if (parsed.data.selectedIndex >= images.length) throw new Error(`LLM selected candidate index ${parsed.data.selectedIndex}, but only ${images.length} images exist.`)
+    return { report: { ...parsed.data, reviewer: 'agent', semanticScore: parsed.data.score }, cost: response.cost }
   }
 
   private async cacheKey(node: CanvasNode, inputs: Record<string, unknown>): Promise<string> {

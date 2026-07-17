@@ -10,7 +10,6 @@ import type { Request, Response, NextFunction } from 'express'
 import { ConfigStore, getRuntimeConfig, redactConfig, type RuntimeConfig } from '../core/config.js'
 import { RevisionConflictError, validateGraph } from '../core/graph.js'
 import { NODE_REGISTRY } from '../core/node-registry.js'
-import { OpenCodeBridge } from '../core/opencode-bridge.js'
 import { WorkflowRunner } from '../core/runner.js'
 import { RunQueue } from '../core/run-queue.js'
 import { WorkspaceStorage } from '../core/storage.js'
@@ -33,7 +32,6 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   await storage.init()
   const runner = new WorkflowRunner(storage, config)
   const queue = new RunQueue(storage, runner, config)
-  const openCode = new OpenCodeBridge(config.openCode)
   const configStore = new ConfigStore(config.configFile)
   const app = express()
   const server = createServer(app)
@@ -170,17 +168,6 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   })
   app.get('/api/provider/capabilities', (_req, res) => res.json({ providerId: config.image.id, model: config.image.model, capabilities: runner.capabilities(), configured: Boolean(config.image.apiKey), costs: config.image.costs }))
 
-  app.get('/api/host/opencode/health', async (_req, res) => res.json(await openCode.health()))
-  app.get('/api/host/opencode/sessions', async (_req, res) => res.json(await openCode.listSessions()))
-  app.post('/api/host/opencode/sessions', async (req, res) => res.status(201).json(await openCode.createSession(String(req.body.title || 'VibeCanvas Creative Session'))))
-  app.post('/api/host/opencode/send', async (req, res) => {
-    const graph = await storage.loadGraph(); const selection = await storage.loadSelection()
-    const selectedNodes = graph.nodes.filter((node) => selection.selectedNodeIds.includes(node.id))
-    const prompt = String(req.body.prompt || buildSelectionPrompt(graph, selectedNodes))
-    const response = await openCode.sendMessage({ sessionId: req.body.sessionId, prompt, agent: req.body.agent, asynchronous: req.body.asynchronous !== false })
-    res.json({ ok: true, response })
-  })
-
   app.post('/api/artifacts/:id/place', async (req, res) => {
     const artifact = await storage.getArtifact(req.params.id)
     if (!artifact) return res.status(404).json({ error: 'Artifact not found' })
@@ -208,14 +195,6 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   return { app, server, storage, runner, queue, config }
 }
 
-function buildSelectionPrompt(graph: WorkflowGraph, selectedNodes: CanvasNode[]): string {
-  const selection = selectedNodes.length ? selectedNodes : graph.nodes
-  return [
-    '使用 VibeCanvas Skills 和 MCP 工具处理当前画布。', `画布：${graph.name}，revision=${graph.revision}，模式：${graph.mode}。`,
-    `目标节点：${selection.map((node) => `${node.id} (${node.data.nodeType})`).join(', ') || '无明确选择'}。`,
-    '先读取 selection 和 graph；所有修改必须使用带 baseRevision 的 apply_graph_patch；高成本运行使用 start_run 并通过 get_run_status 轮询，不要同步等待。'
-  ].join('\n')
-}
 function findClearPosition(graph: WorkflowGraph): { x: number; y: number } { return { x: graph.nodes.reduce((max, node) => Math.max(max, node.position.x + (node.width || 320)), 0) + 80, y: 80 } }
 function normalizeArtifactKind(value: unknown): ArtifactRef['kind'] { return ['image', 'mask', 'annotation', 'json', 'text'].includes(String(value)) ? String(value) as ArtifactRef['kind'] : 'image' }
 function mergeSecrets(current: Record<string, string>, incoming?: Record<string, string>): Record<string, string> {

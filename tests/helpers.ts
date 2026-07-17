@@ -35,9 +35,17 @@ export function makeRuntimeConfig(projectDir: string, overrides: Partial<Runtime
     concurrency: 1,
     leaseSeconds: 10,
     image: makeProfile(),
-    openCode: { baseUrl: 'http://127.0.0.1:4096', username: 'opencode' }
+    llm: {
+      architect: { provider: 'fallback' },
+      reviewer: { provider: 'fallback' }
+    }
   }
-  return { ...base, ...overrides, image: overrides.image ?? base.image, openCode: overrides.openCode ?? base.openCode }
+  return {
+    ...base,
+    ...overrides,
+    image: overrides.image ?? base.image,
+    llm: overrides.llm ?? base.llm
+  }
 }
 
 export async function waitForRun(storage: WorkspaceStorage, runId: string, statuses: WorkflowRun['status'][] = ['completed', 'failed', 'cancelled', 'needs-input'], timeoutMs = 10000): Promise<WorkflowRun> {

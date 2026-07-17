@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { config as loadDotenv } from 'dotenv'
-import type { ImageProviderProfile, VibeCanvasConfigFile } from './types.js'
+import type { ImageProviderProfile, LLMProfile, VibeCanvasConfigFile } from './types.js'
 
 export interface RuntimeConfig {
   projectDir: string
@@ -13,7 +13,7 @@ export interface RuntimeConfig {
   concurrency: number
   leaseSeconds: number
   image: ImageProviderProfile
-  openCode: VibeCanvasConfigFile['openCode']
+  llm: VibeCanvasConfigFile['llm']
 }
 
 export function defaultConfigPath(): string {
@@ -56,13 +56,20 @@ export function defaultProviderProfile(): ImageProviderProfile {
   }
 }
 
+export function defaultLLMProfile(): LLMProfile {
+  // Default to fallback so a fresh install works without any LLM configuration.
+  // The Prompt Architect node uses its deterministic buildPromptSpec, and the
+  // Vision Review node uses technicalReview (image statistics only).
+  return { provider: 'fallback' }
+}
+
 export function defaultConfigFile(): VibeCanvasConfigFile {
   const provider = defaultProviderProfile()
   return {
     version: 1,
     activeProviderId: provider.id,
     providers: { [provider.id]: provider },
-    openCode: { baseUrl: 'http://127.0.0.1:4096', username: 'opencode' },
+    llm: { architect: defaultLLMProfile(), reviewer: defaultLLMProfile() },
     runtime: { host: '127.0.0.1', port: 43120, concurrency: 1, leaseSeconds: 30 }
   }
 }
@@ -113,14 +120,39 @@ export async function getRuntimeConfig(): Promise<RuntimeConfig> {
     concurrency: Math.max(1, Number(process.env.VIBECANVAS_CONCURRENCY || file.runtime.concurrency)),
     leaseSeconds: Math.max(10, Number(process.env.VIBECANVAS_LEASE_SECONDS || file.runtime.leaseSeconds)),
     image: active,
-    openCode: {
-      ...file.openCode,
-      baseUrl: (process.env.OPENCODE_BASE_URL || file.openCode.baseUrl).replace(/\/$/, ''),
-      sessionId: process.env.OPENCODE_SESSION_ID || file.openCode.sessionId,
-      username: process.env.OPENCODE_SERVER_USERNAME || file.openCode.username || 'opencode',
-      password: process.env.OPENCODE_SERVER_PASSWORD || file.openCode.password
+    llm: {
+      architect: applyLLMEnv(file.llm.architect, 'ARCHITECT'),
+      reviewer: applyLLMEnv(file.llm.reviewer, 'REVIEWER')
     }
   }
+}
+
+/**
+ * Overlay environment variables onto an LLM profile. The VIBECANVAS_LLM_<ROLE>_*
+ * family is canonical; legacy OPENCODE_* variables are preserved as the source
+ * for an opencode-session profile so existing setups keep working.
+ */
+function applyLLMEnv(profile: LLMProfile, role: 'ARCHITECT' | 'REVIEWER'): LLMProfile {
+  const provider = process.env[`VIBECANVAS_LLM_${role}_PROVIDER`] as LLMProfile['provider'] | undefined
+  const baseUrl = process.env[`VIBECANVAS_LLM_${role}_BASE_URL`]
+  const apiKey = process.env[`VIBECANVAS_LLM_${role}_API_KEY`]
+  const model = process.env[`VIBECANVAS_LLM_${role}_MODEL`]
+  const headersJson = process.env[`VIBECANVAS_LLM_${role}_HEADERS_JSON`]
+  const merged: LLMProfile = { ...profile }
+  if (provider) merged.provider = provider
+  if (baseUrl) merged.baseUrl = baseUrl.replace(/\/$/, '')
+  if (apiKey) merged.apiKey = apiKey
+  if (model) merged.model = model
+  if (headersJson) merged.headers = { ...(merged.headers || {}), ...parseStringMap(headersJson) }
+  // Legacy OPENCODE_* variables feed the opencode-session provider when the
+  // profile has not been migrated to the new env names.
+  if (merged.provider === 'opencode-session') {
+    if (process.env.OPENCODE_BASE_URL) merged.baseUrl = process.env.OPENCODE_BASE_URL.replace(/\/$/, '')
+    if (process.env.OPENCODE_SESSION_ID) merged.sessionId = process.env.OPENCODE_SESSION_ID
+    if (process.env.OPENCODE_SERVER_USERNAME) merged.username = process.env.OPENCODE_SERVER_USERNAME
+    if (process.env.OPENCODE_SERVER_PASSWORD) merged.password = process.env.OPENCODE_SERVER_PASSWORD
+  }
+  return merged
 }
 
 function applyProviderEnv(profile: ImageProviderProfile): void {
@@ -168,9 +200,19 @@ function mergeConfig(base: VibeCanvasConfigFile, value: Partial<VibeCanvasConfig
     version: 1,
     activeProviderId: value.activeProviderId && providers[value.activeProviderId] ? value.activeProviderId : base.activeProviderId,
     providers,
-    openCode: { ...base.openCode, ...(value.openCode || {}) },
+    llm: {
+      architect: mergeLLMProfile(base.llm.architect, value.llm?.architect),
+      reviewer: mergeLLMProfile(base.llm.reviewer, value.llm?.reviewer)
+    },
     runtime: { ...base.runtime, ...(value.runtime || {}) }
   }
+}
+
+function mergeLLMProfile(base: LLMProfile, value?: Partial<LLMProfile>): LLMProfile {
+  if (!value) return base
+  const merged: LLMProfile = { ...base, ...value }
+  if (value.headers || base.headers) merged.headers = { ...(base.headers || {}), ...(value.headers || {}) }
+  return merged
 }
 
 export function redactConfig(config: VibeCanvasConfigFile): VibeCanvasConfigFile {
@@ -182,7 +224,19 @@ export function redactConfig(config: VibeCanvasConfigFile): VibeCanvasConfigFile
       headers: redactHeaders(profile.headers),
       downloadHeaders: redactHeaders(profile.downloadHeaders)
     }])),
-    openCode: { ...config.openCode, password: config.openCode.password ? '********' : undefined }
+    llm: {
+      architect: redactLLMProfile(config.llm.architect),
+      reviewer: redactLLMProfile(config.llm.reviewer)
+    }
+  }
+}
+
+function redactLLMProfile(profile: LLMProfile): LLMProfile {
+  return {
+    ...profile,
+    apiKey: profile.apiKey ? '********' : undefined,
+    password: profile.password ? '********' : undefined,
+    headers: redactHeaders(profile.headers || {})
   }
 }
 

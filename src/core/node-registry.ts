@@ -49,7 +49,7 @@ export const NODE_REGISTRY: NodeDefinition[] = [
         { label: '动态设计', value: 'dynamic' }, { label: '忠实扩写', value: 'faithful' }, { label: '创意探索', value: 'creative' }
       ] },
       { key: 'extraConstraints', label: '额外约束', type: 'textarea', default: '' },
-      { key: 'useOpenCode', label: '使用 OpenCode Agent', type: 'boolean', default: true }
+      { key: 'llmEnabled', label: '使用 LLM 优化', type: 'boolean', default: true }
     ]
   },
   {
@@ -94,13 +94,13 @@ export const NODE_REGISTRY: NodeDefinition[] = [
     ]
   },
   {
-    type: 'review.quality', version: '2.0.0', label: 'Agent Vision Review', category: 'agent', description: '先进行技术质量门，再由 OpenCode 视觉 Agent 比较需求符合度、主体、构图、文字和参考图遵循度。',
+    type: 'review.quality', version: '2.0.0', label: 'Agent Vision Review', category: 'agent', description: '先进行技术质量门，再由 LLM 视觉评审比较需求符合度、主体、构图、文字和参考图遵循度。',
     inputs: [{ id: 'images', label: '候选图片', type: 'ImageSet', required: true }, { id: 'brief', label: '评审要求', type: 'Text' }],
     outputs: [{ id: 'selected', label: '最佳图片', type: 'Image', required: true }, { id: 'images', label: '评审后候选', type: 'ImageSet', required: true }, { id: 'report', label: '评审报告', type: 'EvaluationReport', required: true }],
     configFields: [
       { key: 'minimumScore', label: '最低分', type: 'number', default: 70, min: 0, max: 100 },
       { key: 'reviewMode', label: '评审模式', type: 'select', default: 'hybrid', options: [
-        { label: '技术检查', value: 'technical' }, { label: 'OpenCode Agent', value: 'agent' }, { label: '混合评审', value: 'hybrid' }
+        { label: '技术检查', value: 'technical' }, { label: 'LLM Agent', value: 'agent' }, { label: '混合评审', value: 'hybrid' }
       ] }
     ]
   },

@@ -39,19 +39,20 @@ function imageBuffer(color = '#a96b49') {
 }
 
 describe('workflow runner and queue', () => {
-  it('reads the current OpenCode info.structured contract for PromptSpec', async () => {
+  it('uses the configured OpenAI-compatible LLM to produce a PromptSpec', async () => {
     const server = createServer(async (req, res) => {
-      if (req.method === 'POST' && req.url === '/session/session-1/message') {
+      if (req.method === 'POST' && req.url === '/v1/chat/completions') {
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify({
-          info: {
-            structured: {
-              subject: 'Structured subject',
-              finalPrompt: 'Structured final prompt',
-              style: 'editorial'
-            },
-            cost: 0.012
-          }
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                subject: 'Structured subject',
+                finalPrompt: 'Structured final prompt',
+                style: 'editorial'
+              })
+            }
+          }]
         }))
         return
       }
@@ -59,9 +60,12 @@ describe('workflow runner and queue', () => {
       res.end()
     })
     const port = await listen(server)
-    const { dir, storage } = await tempWorkspace('vibecanvas-opencode-structured-')
+    const { dir, storage } = await tempWorkspace('vibecanvas-llm-structured-')
     const config = makeRuntimeConfig(dir, {
-      openCode: { baseUrl: `http://127.0.0.1:${port}`, sessionId: 'session-1' }
+      llm: {
+        architect: { provider: 'openai-chat', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'test', model: 'mock-architect' },
+        reviewer: { provider: 'fallback' }
+      }
     })
     const graph = createStarterGraph()
     const promptNode = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
@@ -73,14 +77,13 @@ describe('workflow runner and queue', () => {
       subject: 'Structured subject',
       finalPrompt: 'Structured final prompt'
     })
-    expect(completed.actualCostUsd).toBe(0.012)
     storage.close()
   })
 
-  it('performs a real OpenCode vision review with attached candidate files', async () => {
+  it('attaches candidate images when calling the LLM vision review endpoint', async () => {
     const image = await imageBuffer()
-    let openCodeRequests = 0
-    let visionFileCount = 0
+    let chatRequests = 0
+    let visionImageCount = 0
     const server = createServer(async (req, res) => {
       if (req.method === 'POST' && req.url === '/v1/images/generations') {
         res.setHeader('content-type', 'application/json')
@@ -92,35 +95,25 @@ describe('workflow runner and queue', () => {
         }))
         return
       }
-      if (req.method === 'POST' && req.url === '/session/session-vision/message') {
+      if (req.method === 'POST' && req.url === '/v1/chat/completions') {
         let body = ''
         for await (const chunk of req) body += chunk
-        const parsed = JSON.parse(body) as { parts: Array<{ type: string }> }
-        openCodeRequests += 1
-        res.setHeader('content-type', 'application/json')
-        if (openCodeRequests === 1) {
-          res.end(JSON.stringify({
-            info: {
-              structured: {
-                subject: 'IP character',
-                finalPrompt: 'Generate an IP character'
-              }
-            }
-          }))
-        } else {
-          visionFileCount = parsed.parts.filter((part) => part.type === 'file').length
-          res.end(JSON.stringify({
-            info: {
-              structured: {
-                decision: 'pass',
-                selectedIndex: 1,
-                score: 92,
-                issues: []
-              },
-              cost: 0.02
-            }
-          }))
+        const parsed = JSON.parse(body) as { messages: Array<{ content: unknown }> }
+        chatRequests += 1
+        const userMessage = parsed.messages.find((message) => typeof message.content !== 'string')
+        if (userMessage && Array.isArray(userMessage.content)) {
+          visionImageCount = userMessage.content.filter((part: { type?: string }) => part.type === 'image_url').length
         }
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({
+          choices: [{
+            message: {
+              content: JSON.stringify(chatRequests === 1
+                ? { subject: 'IP character', finalPrompt: 'Generate an IP character' }
+                : { decision: 'pass', selectedIndex: 1, score: 92, issues: [] })
+            }
+          }]
+        }))
         return
       }
       res.statusCode = 404
@@ -134,7 +127,10 @@ describe('workflow runner and queue', () => {
         baseUrl: `http://127.0.0.1:${port}/v1`,
         maxRetries: 0
       }),
-      openCode: { baseUrl: `http://127.0.0.1:${port}`, sessionId: 'session-vision' }
+      llm: {
+        architect: { provider: 'openai-chat', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'test', model: 'mock-architect' },
+        reviewer: { provider: 'openai-chat', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'test', model: 'mock-vision' }
+      }
     })
     const graph = createStarterGraph()
     const review = graph.nodes.find((node) => node.data.nodeType === 'review.quality')!
@@ -144,7 +140,7 @@ describe('workflow runner and queue', () => {
     const completed = await new WorkflowRunner(storage, config).execute(run, 'vision-worker')
 
     expect(completed.status).toBe('completed')
-    expect(visionFileCount).toBe(2)
+    expect(visionImageCount).toBe(2)
     expect(completed.nodeRuns[review.id].outputs?.report).toMatchObject({
       reviewer: 'hybrid',
       selectedIndex: 1,
@@ -171,7 +167,7 @@ describe('workflow runner and queue', () => {
     const { dir, storage } = await tempWorkspace('vibecanvas-run-cancel-')
     const graph = createStarterGraph()
     const prompt = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
-    prompt.data.config.useOpenCode = false
+    prompt.data.config.llmEnabled = false
     const generation = graph.nodes.find((node) => node.data.nodeType === 'image.generate')!
     generation.data.config.candidateCount = 1
     const config = makeRuntimeConfig(dir, {
@@ -276,7 +272,7 @@ describe('workflow runner and queue', () => {
     const { dir, storage } = await tempWorkspace('vibecanvas-queue-')
     const graph = await storage.loadGraph()
     const prompt = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
-    prompt.data.config.useOpenCode = false
+    prompt.data.config.llmEnabled = false
     await storage.saveGraph(graph, graph.revision, 'disable-opencode')
     const config = makeRuntimeConfig(dir)
     const runner = new WorkflowRunner(storage, config)
@@ -295,39 +291,36 @@ describe('workflow runner and queue', () => {
     storage.close()
   })
 
-  it('cancels an in-flight OpenCode request via AbortController without disrupting the shared session', async () => {
-    let messageStarted = 0
-    let abortEndpointHit = false
+  it('cancels an in-flight LLM request via AbortController without leaking the cancellation', async () => {
+    let llmStarted = 0
     const server = createServer(async (req, res) => {
-      if (req.method === 'POST' && req.url === '/session/session-cancel/message') {
-        messageStarted += 1
+      if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+        llmStarted += 1
         // Hold the response long enough for the cancellation to fire.
         await new Promise((resolve) => setTimeout(resolve, 900))
         if (!res.destroyed) {
           res.setHeader('content-type', 'application/json')
-          res.end(JSON.stringify({ info: { structured: { subject: 'late', finalPrompt: 'late' } } }))
+          res.end(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ subject: 'late', finalPrompt: 'late' }) } }]
+          }))
         }
-        return
-      }
-      if (req.method === 'POST' && req.url === '/session/session-cancel/abort') {
-        // cancel() no longer calls abortSession — this endpoint must NOT be hit.
-        abortEndpointHit = true
-        res.setHeader('content-type', 'application/json')
-        res.end('true')
         return
       }
       res.statusCode = 404
       res.end()
     })
     const port = await listen(server)
-    const { dir, storage } = await tempWorkspace('vibecanvas-opencode-cancel-')
+    const { dir, storage } = await tempWorkspace('vibecanvas-llm-cancel-')
     const graph = createStarterGraph()
     const promptNode = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
     const runner = new WorkflowRunner(storage, makeRuntimeConfig(dir, {
-      openCode: { baseUrl: `http://127.0.0.1:${port}`, sessionId: 'session-cancel' }
+      llm: {
+        architect: { provider: 'openai-chat', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'test', model: 'mock-architect' },
+        reviewer: { provider: 'fallback' }
+      }
     }))
     const run = await storage.enqueueRun(graph, promptNode.id)
-    const execution = runner.execute(run, 'opencode-cancel-worker')
+    const execution = runner.execute(run, 'llm-cancel-worker')
     let cancelPromise: Promise<boolean> | undefined
     setTimeout(() => { cancelPromise = runner.cancel(run.id) }, 80)
     const cancelled = await execution
@@ -335,10 +328,8 @@ describe('workflow runner and queue', () => {
     await cancelPromise
 
     expect(cancelled.status).toBe('cancelled')
-    // The message endpoint was reached (request started), proving the run reached the OpenCode call.
-    expect(messageStarted).toBeGreaterThanOrEqual(1)
-    // The shared session-level abort endpoint must NOT be called — cancellation is per-run via AbortController.
-    expect(abortEndpointHit).toBe(false)
+    // The LLM endpoint was reached (request started), proving the run reached the LLM call.
+    expect(llmStarted).toBeGreaterThanOrEqual(1)
     storage.close()
   })
 
@@ -347,7 +338,7 @@ describe('workflow runner and queue', () => {
     const childGraph = createStarterGraph()
     childGraph.name = 'Child prompt workflow'
     const childPrompt = childGraph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
-    childPrompt.data.config.useOpenCode = false
+    childPrompt.data.config.llmEnabled = false
     const childBrief = childGraph.nodes.find((node) => node.data.nodeType === 'input.brief')!
     childGraph.nodes = [childBrief, childPrompt]
     childGraph.edges = childGraph.edges.filter(
@@ -439,7 +430,7 @@ describe('workflow runner and queue', () => {
     const { dir, storage } = await tempWorkspace('vibecanvas-auto-select-')
     const graph = createStarterGraph()
     const prompt = graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!
-    prompt.data.config.useOpenCode = false
+    prompt.data.config.llmEnabled = false
     const generation = graph.nodes.find((node) => node.data.nodeType === 'image.generate')!
     generation.data.config.candidateCount = 1
     const review = graph.nodes.find((node) => node.data.nodeType === 'review.quality')!
@@ -459,22 +450,26 @@ describe('workflow runner and queue', () => {
     storage.close()
   })
 
-  it('rejects an out-of-range candidate index from Agent Vision Review', async () => {
+  it('rejects an out-of-range candidate index from the LLM Vision Review', async () => {
     const image = await imageBuffer()
-    let openCodeRequests = 0
+    let chatRequests = 0
     const server = createServer(async (req, res) => {
       if (req.method === 'POST' && req.url === '/v1/images/generations') {
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify({ data: [{ b64_json: image.toString('base64') }] }))
         return
       }
-      if (req.method === 'POST' && req.url === '/session/session-bad-index/message') {
-        openCodeRequests += 1
+      if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+        chatRequests += 1
         res.setHeader('content-type', 'application/json')
         res.end(JSON.stringify({
-          info: { structured: openCodeRequests === 1
-            ? { subject: 'subject', finalPrompt: 'prompt' }
-            : { decision: 'pass', selectedIndex: 9, score: 90, issues: [] } }
+          choices: [{
+            message: {
+              content: JSON.stringify(chatRequests === 1
+                ? { subject: 'subject', finalPrompt: 'prompt' }
+                : { decision: 'pass', selectedIndex: 9, score: 90, issues: [] })
+            }
+          }]
         }))
         return
       }
@@ -487,7 +482,10 @@ describe('workflow runner and queue', () => {
     const review = graph.nodes.find((node) => node.data.nodeType === 'review.quality')!
     const config = makeRuntimeConfig(dir, {
       image: makeProfile({ apiKey: 'test', baseUrl: `http://127.0.0.1:${port}/v1`, maxRetries: 0 }),
-      openCode: { baseUrl: `http://127.0.0.1:${port}`, sessionId: 'session-bad-index' }
+      llm: {
+        architect: { provider: 'openai-chat', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'test', model: 'mock-architect' },
+        reviewer: { provider: 'openai-chat', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'test', model: 'mock-vision' }
+      }
     })
     const run = await storage.enqueueRun(graph, review.id)
     const completed = await new WorkflowRunner(storage, config).execute(run, 'bad-index-worker')

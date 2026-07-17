@@ -24,7 +24,7 @@ describe('full image workflow', () => {
       const address = apiServer.address(); if (!address || typeof address === 'string') throw new Error('No port')
       const { dir, storage } = await tempWorkspace('vibecanvas-full-')
       const graph = createStarterGraph()
-      graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!.data.config.useOpenCode = false
+      graph.nodes.find((node) => node.data.nodeType === 'agent.prompt-architect')!.data.config.llmEnabled = false
       graph.nodes.find((node) => node.data.nodeType === 'review.quality')!.data.config.reviewMode = 'technical'
       graph.nodes.find((node) => node.data.nodeType === 'image.generate')!.data.config.candidateCount = 2
       const current = await storage.loadGraph(); graph.revision = current.revision; graph.createdAt = current.createdAt

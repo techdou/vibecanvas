@@ -71,7 +71,7 @@ export interface EvaluationReport {
   repairPrompt?: string
   technicalScore?: number
   semanticScore?: number
-  reviewer?: 'technical' | 'opencode' | 'hybrid'
+  reviewer?: 'technical' | 'agent' | 'hybrid'
 }
 
 export interface PortDefinition {
@@ -313,17 +313,31 @@ export interface ImageProviderProfile {
   costs: ProviderCostTable
 }
 
+/**
+ * LLM provider profile. Consumed by the Prompt Architect and Vision Review nodes
+ * to talk to an external reasoning service. Mirrors src/core/llm-provider.ts.
+ */
+export interface LLMProfile {
+  provider: 'openai-chat' | 'opencode-session' | 'fallback'
+  baseUrl?: string
+  apiKey?: string
+  model?: string
+  sessionId?: string
+  username?: string
+  password?: string
+  headers?: Record<string, string>
+  requestTimeoutMs?: number
+  maxRetries?: number
+}
+
 export interface VibeCanvasConfigFile {
   version: 1
   activeProviderId: string
   providers: Record<string, ImageProviderProfile>
-  openCode: {
-    baseUrl: string
-    sessionId?: string
-    username?: string
-    password?: string
-    agent?: string
-    model?: { providerID: string; modelID: string }
+  /** Pluggable LLM profiles for the Prompt Architect and Vision Review nodes. */
+  llm: {
+    architect: LLMProfile
+    reviewer: LLMProfile
   }
   runtime: {
     host: string

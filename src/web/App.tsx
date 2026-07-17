@@ -3,7 +3,7 @@ import {
   addEdge, applyEdgeChanges, applyNodeChanges, Background, BackgroundVariant, Controls, MiniMap, Panel, ReactFlow,
   ReactFlowProvider, type Connection, type EdgeChange, type NodeChange, type OnSelectionChangeParams, type ReactFlowInstance, type Viewport
 } from '@xyflow/react'
-import { BookmarkPlus, Bot, CheckCircle2, CircleAlert, Clock3, History, Play, RotateCcw, Settings2, Workflow } from 'lucide-react'
+import { BookmarkPlus, CheckCircle2, CircleAlert, Clock3, History, Play, RotateCcw, Settings2, Workflow } from 'lucide-react'
 import type {
   ArtifactLineage, ArtifactRef, CanvasEdge, CanvasNode, GraphPatchOperation, NodeDefinition, RunEvent,
   TemplateRecord, ValidationResult, VibeCanvasConfigFile, WorkflowGraph, WorkflowRun
@@ -38,7 +38,6 @@ function Studio() {
   const [message, setMessage] = useState('正在加载工作区…')
   const [imageConfigured, setImageConfigured] = useState(false)
   const [events, setEvents] = useState<RunEvent[]>([])
-  const [openCodeSessionId, setOpenCodeSessionId] = useState(() => localStorage.getItem('vibecanvas-opencode-session') || '')
   const [showRuns, setShowRuns] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
@@ -200,14 +199,6 @@ function Studio() {
   const openLineage = useCallback(async (artifact: ArtifactRef) => setLineage(await api.getLineage(artifact.id)), [])
   const placeArtifact = useCallback(async (artifact: ArtifactRef) => { const result = await api.placeArtifact(artifact.id); syncGraph(result.graph) }, [syncGraph])
 
-  const sendToAgent = useCallback(async () => {
-    const defaultPrompt = selectedNode ? `使用 VibeCanvas MCP 读取当前 selection，重点处理节点 ${selectedNode.id} (${selectedNode.data.nodeType})。先获取当前 graph revision，再使用 apply_graph_patch 原子修改；高成本生成请调用 run_to_node 并轮询状态。` : '使用 VibeCanvas MCP 读取 selection 和 graph，理解创作目标并完善工作流。'
-    const prompt = window.prompt('发送给 OpenCode Agent 的任务：', defaultPrompt); if (!prompt) return
-    let sessionId = openCodeSessionId
-    if (!sessionId) { const session = await api.createOpenCodeSession('VibeCanvas Creative Session'); sessionId = session.id; setOpenCodeSessionId(sessionId); localStorage.setItem('vibecanvas-opencode-session', sessionId) }
-    await api.sendToOpenCode(prompt, sessionId); setMessage(`任务已发送到 OpenCode Session：${sessionId}`)
-  }, [selectedNode, openCodeSessionId])
-
   const loadConfig = useCallback(async () => { setConfigFile(await api.getConfig()); setShowSettings(true) }, [])
   const openHistory = useCallback(async () => { setRevisions(await api.getRevisions()); setShowHistory(true) }, [])
   const saveCurrentTemplate = useCallback(async () => {
@@ -247,9 +238,9 @@ function Studio() {
         <Panel position="top-left" className="canvas-hint">{message}</Panel>
         {validation ? <Panel position="bottom-center" className={`validation-banner ${validation.valid ? 'valid' : 'invalid'}`}>{validation.valid ? '工作流有效' : validation.problems.slice(0, 2).map((problem) => problem.message).join(' · ')}</Panel> : null}
       </ReactFlow></section>
-      <Inspector node={selectedNode} definition={selectedDefinition} artifacts={artifacts} onChange={updateSelectedConfig} onRun={() => selectedNode && void run(selectedNode.id)} onUpload={uploadForSelected} onSendToAgent={() => void sendToAgent()} onOpenEditor={setMarkupMode} onLineage={(artifact) => void openLineage(artifact)} onPlaceArtifact={(artifact) => void placeArtifact(artifact)} />
+      <Inspector node={selectedNode} definition={selectedDefinition} artifacts={artifacts} onChange={updateSelectedConfig} onRun={() => selectedNode && void run(selectedNode.id)} onUpload={uploadForSelected} onOpenEditor={setMarkupMode} onLineage={(artifact) => void openLineage(artifact)} onPlaceArtifact={(artifact) => void placeArtifact(artifact)} />
     </main>
-    <footer className="statusbar"><span>{nodes.length} 节点 · {edges.length} 连接 · {artifacts.length} 素材 · {runs.filter((item) => ['queued','running','needs-input'].includes(item.status)).length} 活跃 Run</span><span className="event-line">{events[0]?.message || '画布已就绪。'}</span><button onClick={() => void sendToAgent()}><Bot size={14} />与 Agent 协作</button></footer>
+    <footer className="statusbar"><span>{nodes.length} 节点 · {edges.length} 连接 · {artifacts.length} 素材 · {runs.filter((item) => ['queued','running','needs-input'].includes(item.status)).length} 活跃 Run</span><span className="event-line">{events[0]?.message || '画布已就绪。'}</span></footer>
 
     {markupMode && selectedArtifact ? <ImageMarkupEditor artifact={selectedArtifact} mode={markupMode} onClose={() => setMarkupMode(undefined)} onSave={saveMarkup} /> : null}
     {showRuns ? <RunPanel runs={runs} onClose={() => setShowRuns(false)} onCancel={async (id) => { await api.cancelRun(id); await refreshRuntime() }} onChoose={(item) => { setCandidateRun(item); setShowRuns(false) }} /> : null}

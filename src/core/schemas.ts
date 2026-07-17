@@ -103,5 +103,5 @@ export const evaluationReportSchema = z.object({
   repairPrompt: z.string().optional(),
   technicalScore: z.number().min(0).max(100).optional(),
   semanticScore: z.number().min(0).max(100).optional(),
-  reviewer: z.enum(['technical', 'opencode', 'hybrid']).optional()
+  reviewer: z.enum(['technical', 'agent', 'hybrid']).optional()
 })

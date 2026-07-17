@@ -45,9 +45,5 @@ export const api = {
   applyTemplate: (id: string) => request<WorkflowGraph>(`/api/templates/${id}/apply`, { method: 'POST' }),
   getConfig: () => request<VibeCanvasConfigFile>('/api/config'),
   saveProvider: (id: string, profile: Record<string, unknown>) => request<{ config: VibeCanvasConfigFile; restartRequired: boolean }>(`/api/config/providers/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(profile) }),
-  getProviderCapabilities: () => request<{ providerId: string; model: string; configured: boolean; capabilities: Record<string, unknown>; costs: Record<string, number> }>('/api/provider/capabilities'),
-  openCodeHealth: () => request('/api/host/opencode/health'),
-  openCodeSessions: () => request<Array<{ id: string; title?: string }>>('/api/host/opencode/sessions'),
-  createOpenCodeSession: (title: string) => request<{ id: string }>('/api/host/opencode/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) }),
-  sendToOpenCode: (prompt: string, sessionId?: string) => request('/api/host/opencode/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, sessionId, asynchronous: true }) })
+  getProviderCapabilities: () => request<{ providerId: string; model: string; configured: boolean; capabilities: Record<string, unknown>; costs: Record<string, number> }>('/api/provider/capabilities')
 }

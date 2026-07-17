@@ -1,4 +1,4 @@
-import { ExternalLink, GitBranch, ImageDown, Play, Save, Scissors, Upload } from 'lucide-react'
+import { GitBranch, ImageDown, Play, Save, Scissors, Upload } from 'lucide-react'
 import type { ArtifactRef, CanvasNode, ConfigFieldDefinition, NodeDefinition } from '../../core/types.js'
 
 interface Props {
@@ -8,20 +8,19 @@ interface Props {
   onChange: (patch: Record<string, unknown>) => void
   onRun: () => void
   onUpload: (file: File, role?: string) => Promise<void>
-  onSendToAgent: () => void
   onOpenEditor: (mode: 'annotation' | 'mask') => void
   onLineage: (artifact: ArtifactRef) => void
   onPlaceArtifact: (artifact: ArtifactRef) => void
 }
 
-export function Inspector({ node, definition, artifacts, onChange, onRun, onUpload, onSendToAgent, onOpenEditor, onLineage, onPlaceArtifact }: Props) {
+export function Inspector({ node, definition, artifacts, onChange, onRun, onUpload, onOpenEditor, onLineage, onPlaceArtifact }: Props) {
   const selectedArtifact = node?.data.config.artifactId ? artifacts.find((item) => item.id === node.data.config.artifactId) : undefined
   if (!node || !definition) {
     return <aside className="inspector panel-shell"><div className="panel-title"><Save size={17} /><span>属性与素材</span></div><div className="empty-state">选择一个节点，在这里编辑参数、上传参考图、批注或运行到该节点。</div><ArtifactList artifacts={artifacts} onLineage={onLineage} onPlace={onPlaceArtifact} /></aside>
   }
   return <aside className="inspector panel-shell">
     <div className="panel-title"><Save size={17} /><span>{definition.label}</span></div><p className="panel-help">{definition.description}</p>
-    <div className="inspector-actions"><button onClick={onRun}><Play size={14} />运行到此</button><button onClick={onSendToAgent}><ExternalLink size={14} />交给 Agent</button></div>
+    <div className="inspector-actions"><button onClick={onRun}><Play size={14} />运行到此</button></div>
     {selectedArtifact && ['canvas.image','input.image'].includes(node.data.nodeType) ? <div className="inspector-actions editor-actions"><button onClick={() => onOpenEditor('annotation')}><ImageDown size={14} />批注</button><button onClick={() => onOpenEditor('mask')}><Scissors size={14} />Mask</button><button onClick={() => onLineage(selectedArtifact)}><GitBranch size={14} />版本树</button></div> : null}
     <div className="field-list">{definition.configFields.map((field) => <ConfigField key={field.key} field={field} value={node.data.config[field.key]} onChange={(value) => onChange({ [field.key]: value })} onUpload={onUpload} />)}</div>
     {node.data.outputs ? <details className="json-details"><summary>最近设计态输出</summary><pre>{JSON.stringify(node.data.outputs, null, 2)}</pre></details> : null}

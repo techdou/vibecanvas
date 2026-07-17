@@ -36,7 +36,7 @@ describe('unified configuration', () => {
           ...defaultConfigFile().providers['default-image2'], id: 'relay', label: 'Relay', capabilities: { ...defaultConfigFile().providers['default-image2'].capabilities, maskEdit: false }, costs: { ...defaultConfigFile().providers['default-image2'].costs, high: 0.12 }
         }
       },
-      openCode: { baseUrl: 'http://127.0.0.1:4096' },
+      llm: { architect: { provider: 'fallback' }, reviewer: { provider: 'fallback' } },
       runtime: { host: '127.0.0.1', port: 43120, concurrency: 2, leaseSeconds: 30 }
     })
     const loaded = await store.load()
