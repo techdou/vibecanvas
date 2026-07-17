@@ -38,6 +38,11 @@ npm run build
 ### 2. Install skills + write ZCode MCP config
 
 ```bash
+# New unified flag (preferred)
+vibecanvas install-skills --project /absolute/path/to/your/project --target-agents zcode
+#   or equivalently: --all-agents
+
+# Legacy flag still works
 npm run install:skills -- --project /absolute/path/to/your/project --write-zcode
 ```
 

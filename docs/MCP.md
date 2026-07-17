@@ -2,6 +2,31 @@
 
 VibeCanvas 2.0 exposes 21 tools through stdio.
 
+## Service startup
+
+The MCP server is one of three process entry points. It reads the same `VIBECANVAS_PROJECT_DIR` / `VIBECANVAS_CONFIG_FILE` env vars as the Web process, so both can run side-by-side and share the SQLite WAL store.
+
+```bash
+# Start the Web process (canvas UI + REST API + WebSocket)
+vibecanvas serve
+#   or: npm start
+#   or: node dist/node/cli.js serve
+
+# Start the MCP stdio server (drives the canvas from an external agent)
+vibecanvas mcp
+#   or: npm run mcp
+#   or: node dist/node/cli.js mcp
+#   or: node dist/node/mcp.js
+```
+
+External agents (ZCode, OpenCode, Claude Code) connect by spawning `node dist/node/mcp.js` as a stdio child process. Run `vibecanvas install-skills --target-agents <agents>` to generate the per-agent config file that registers the MCP server:
+
+- ZCode → `.zcode/config.json`
+- OpenCode → `opencode.json`
+- Claude Code → `.mcp.json`
+
+Each config injects `VIBECANVAS_PROJECT_DIR` and `VIBECANVAS_CONFIG_FILE` into the spawned child's env. Restart the agent session after installing so it picks up the new MCP server.
+
 ## Context and graph
 
 - `get_workspace_context`

@@ -95,11 +95,12 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component view.
 
 ### Agent collaboration
 
-- OpenCode Structured Output Prompt Architect
+- Pluggable LLM layer for Prompt Architect and Vision Review (OpenAI-compatible, OpenCode session, or local fallback)
 - Agent Vision Review receives actual candidate files (not filenames)
-- Deterministic local fallback for workflows that don't need an Agent
+- Deterministic local fallback for workflows that don't need an LLM
 - 21 MCP tools for graph patching, artifact inspection, run control, and candidate resolution
 - Skills for routing, composing, generating, editing, and reviewing
+- One-click agent config generation for ZCode, OpenCode, and Claude Code
 
 ### Reliability
 
@@ -203,9 +204,9 @@ The application creates it automatically on first run. Provider Settings in the 
       "costs": { "low": 0, "medium": 0, "high": 0, "auto": 0, "editMultiplier": 1 }
     }
   },
-  "openCode": {
-    "baseUrl": "http://127.0.0.1:4096",
-    "username": "opencode"
+  "llm": {
+    "architect": { "provider": "fallback" },
+    "reviewer": { "provider": "fallback" }
   },
   "runtime": {
     "host": "127.0.0.1",
@@ -226,23 +227,62 @@ Environment variable overrides are documented in [`.env.example`](.env.example).
 npm run doctor -- --probe-provider
 ```
 
-## OpenCode integration
+## CLI
 
-```bash
-opencode serve \
-  --hostname 127.0.0.1 \
-  --port 4096 \
-  --cors http://127.0.0.1:5173 \
-  --cors http://127.0.0.1:43120
+VibeCanvas ships a single unified entry point. Install globally (`npm install -g`) or use `node dist/node/cli.js` directly:
+
+```text
+vibecanvas serve [--project DIR] [--host H] [--port N]   Web process (canvas + REST API + WebSocket)
+vibecanvas mcp                                            MCP stdio server (21 tools for external agents)
+vibecanvas dev                                            Web + MCP + Vite watch in parallel (local dev)
+vibecanvas doctor [--probe-provider]                      Environment health checks
+vibecanvas install-skills [--target-agents AGENTS]        Install skills + generate per-agent MCP config
+vibecanvas validate [--project DIR]                       Validate the current design graph
+vibecanvas open                                           Open the running Web UI in the default browser
 ```
 
-Install project-local Skills and write MCP configuration:
+`npm start` / `npm run mcp` / `npm run cli` are aliased to the CLI for backward compatibility.
+
+## LLM providers
+
+The Prompt Architect and Vision Review nodes talk to a pluggable LLM layer — they are not bound to any specific vendor. Two independent profiles (`architect`, `reviewer`) live in the shared config:
+
+```json
+{
+  "llm": {
+    "architect": { "provider": "openai-chat", "baseUrl": "https://ark.cn-beijing.volces.com/api/v3", "apiKey": "...", "model": "doubao-pro-32k" },
+    "reviewer":  { "provider": "openai-chat", "baseUrl": "https://api.openai.com/v1", "apiKey": "...", "model": "gpt-4o" }
+  }
+}
+```
+
+Supported providers:
+- `openai-chat` — any OpenAI-compatible `/chat/completions` endpoint (OpenAI, Doubao/Ark, GLM, OpenRouter, ollama, vLLM).
+- `opencode-session` — legacy `opencode serve` HTTP API (preserved for existing setups).
+- `fallback` — deterministic local heuristic. The default; works offline with no API key.
+
+See [`docs/LLM.md`](docs/LLM.md) for full configuration, request shape, and migration from the legacy OpenCode-only setup.
+
+## Agent integration
+
+VibeCanvas works with any MCP-capable agent (ZCode, OpenCode, Claude Code). To register the MCP server for one or more agents in a project:
 
 ```bash
-npm run install:skills -- \
+vibecanvas install-skills \
   --project /absolute/path/to/project \
-  --write-opencode
+  --target-agents zcode,opencode
+#   or: --all-agents  (covers zcode + opencode + claude-code)
 ```
+
+This copies the five VibeCanvas skills into the project's `.agents/skills/` and writes the agent-specific MCP config:
+
+| Agent | Config file |
+|---|---|
+| ZCode | `.zcode/config.json` |
+| OpenCode | `opencode.json` |
+| Claude Code | `.mcp.json` |
+
+Restart the agent session after installing so it picks up the new MCP server and skills.
 
 <details>
 <summary>Recommended Agent prompt</summary>
