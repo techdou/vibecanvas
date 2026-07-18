@@ -1,41 +1,31 @@
-# VibeCanvas
+<p align="center">
+  <img src="assets/hero.png" alt="VibeCanvas — Agent-native image workflows" width="900" />
+</p>
 
-> Local-first, Agent-native visual creation studio — infinite canvas + typed workflow + MCP orchestration + OpenAI-compatible image provider.
+<h1 align="center">VibeCanvas</h1>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-brightgreen)](https://nodejs.org)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)](https://www.typescriptlang.org/)
-[![Tests: 40 passed](https://img.shields.io/badge/tests-40%20passed-brightgreen)](#test-status)
+<p align="center">
+  Local-first, agent-native visual creation studio — infinite canvas + typed workflow + MCP orchestration + OpenAI-compatible image provider.
+</p>
 
-VibeCanvas combines a freeform infinite canvas, a typed ComfyUI-style semantic workflow, OpenCode/MCP orchestration, and an OpenAI-compatible Image provider — designed for AI coding agents (OpenCode, Codex, Claude Code, etc.) that don't have a built-in image model.
-
----
-
-## Table of contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [OpenCode integration](#opencode-integration)
-- [MCP tools](#mcp-tools)
-- [Project structure](#project-structure)
-- [Development](#development)
-- [Testing](#testing)
-- [Security](#security)
-- [License](#license)
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg" /></a>
+  <img alt="Node.js" src="https://img.shields.io/badge/node-%E2%89%A5%2022.5-brightgreen" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.9-blue" />
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-21%20tools-purple" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-47%20passed-brightgreen" />
+</p>
 
 ---
 
 ## Overview
 
-VibeCanvas is **not** a wrapper around a specific image API. It's a local-first canvas + typed workflow executor that lets any MCP-capable AI agent design and run visual creation pipelines. The agent reasons at the semantic level (prompt architect, vision review, candidate selection); an external image relay does the actual rendering.
+VibeCanvas is **not** a wrapper around a specific image API. It's a local-first canvas + typed workflow executor that lets any MCP-capable AI agent (ZCode, OpenCode, Claude Code, Codex, etc.) design and run visual creation pipelines. The agent reasons at the semantic level (prompt architect, vision review, candidate selection); an external image relay does the actual rendering.
 
 ```text
 Freeform canvas + typed workflow
             ↓
-Agent Prompt Architect / Agent Vision Review
+Prompt Architect / Vision Review  (pluggable LLM, optional)
             ↓
 Image generate or edit (OpenAI-compatible API)
             ↓
@@ -47,6 +37,23 @@ Place beside, below, or replace in place
 ```
 
 VibeCanvas uses semantic creative nodes rather than diffusion-internal Checkpoint/VAE/Sampler nodes, making it suitable for hosted image APIs while remaining extensible.
+
+## Table of contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [CLI](#cli)
+- [LLM providers](#llm-providers)
+- [Agent integration](#agent-integration)
+- [MCP tools](#mcp-tools)
+- [Project structure](#project-structure)
+- [Development](#development)
+- [Testing](#testing)
+- [Security](#security)
+- [License](#license)
 
 ## Architecture
 
@@ -69,7 +76,7 @@ src/core  (pure business logic — no React/Express/MCP dependencies)
 
 - **Graph patch transactions** — every canvas mutation goes through `apply_graph_patch` with optimistic revision CAS (double-checked in memory + SQL `WHERE revision=?`)
 - **Immutable run snapshots** — each run deep-clones the graph at enqueue time; runners never see live edits
-- **Lease-based queue** — async run queue with heartbeat, crash recovery, and cancellation propagated to fetch/sleep/OpenCode
+- **Lease-based queue** — async run queue with heartbeat, crash recovery, and cancellation propagated to fetch/sleep/LLM calls
 - **AbortController end-to-end** — from user cancel → DB status → in-flight API call
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component view.
@@ -95,12 +102,12 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component view.
 
 ### Agent collaboration
 
-- Pluggable LLM layer for Prompt Architect and Vision Review (OpenAI-compatible, OpenCode session, or local fallback)
+- **Pluggable LLM layer** for Prompt Architect and Vision Review (OpenAI-compatible, OpenCode session, or local fallback)
 - Agent Vision Review receives actual candidate files (not filenames)
 - Deterministic local fallback for workflows that don't need an LLM
-- 21 MCP tools for graph patching, artifact inspection, run control, and candidate resolution
-- Skills for routing, composing, generating, editing, and reviewing
-- One-click agent config generation for ZCode, OpenCode, and Claude Code
+- **21 MCP tools** for graph patching, artifact inspection, run control, and candidate resolution
+- 5 parameter-level skills for routing, composing, generating, editing, and reviewing
+- One-command agent config generation for ZCode, OpenCode, and Claude Code
 
 ### Reliability
 
@@ -116,8 +123,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component view.
 
 - **Node.js ≥ 22.5** (uses built-in `node:sqlite`)
 - **npm**
-- An OpenAI-compatible image relay for generation
-- OpenCode server (optional — only for Agent Prompt Architect / Vision Review)
+- An OpenAI-compatible image provider for generation (any `/v1/images/generations` endpoint)
+- An OpenAI-compatible chat endpoint for LLM-assisted prompt/review (optional — falls back to local heuristic)
 
 ### Install
 
@@ -140,17 +147,15 @@ This starts both the API server (tsx watch) and the web dev server (Vite) concur
 | URL | Description |
 |---|---|
 | `http://127.0.0.1:5173` | Development web UI (Vite) |
-| `http://127.0.0.1:43120` | Production web UI (after `npm start`) |
+| `http://127.0.0.1:43120` | Production web UI (after `vibecanvas serve`) |
 
 ### Open a specific project
 
-```bash
-# Linux / macOS
-VIBECANVAS_PROJECT_DIR=/path/to/project npm start
+By default VibeCanvas uses the current working directory as the user project. To point it at a different project:
 
-# PowerShell
-$env:VIBECANVAS_PROJECT_DIR="D:\Projects\visual-project"
-npm start
+```bash
+vibecanvas serve --project /absolute/path/to/your/project
+# or: VIBECANVAS_PROJECT_DIR=/path/to/project vibecanvas serve
 ```
 
 ## Configuration
@@ -224,7 +229,7 @@ Environment variable overrides are documented in [`.env.example`](.env.example).
 **Connectivity probe** (makes a real low-quality generation request, may incur cost):
 
 ```bash
-npm run doctor -- --probe-provider
+vibecanvas doctor --probe-provider
 ```
 
 ## CLI
@@ -257,6 +262,7 @@ The Prompt Architect and Vision Review nodes talk to a pluggable LLM layer — t
 ```
 
 Supported providers:
+
 - `openai-chat` — any OpenAI-compatible `/chat/completions` endpoint (OpenAI, Doubao/Ark, GLM, OpenRouter, ollama, vLLM).
 - `opencode-session` — legacy `opencode serve` HTTP API (preserved for existing setups).
 - `fallback` — deterministic local heuristic. The default; works offline with no API key.
@@ -315,20 +321,20 @@ vibecanvas/
 │   │   ├── runner.ts      # Workflow execution engine
 │   │   ├── run-queue.ts   # Async queue with lease + recovery
 │   │   ├── graph.ts       # Graph validation + patch + topology
-│   │   ├── image-provider.ts  # OpenAI-compatible adapter + SSRF guard
-│   │   ├── node-registry.ts   # Node type definitions
-│   │   └── ...
+│   │   ├── image-provider.ts   # OpenAI-compatible adapter + SSRF guard
+│   │   ├── llm-provider.ts     # Pluggable LLM layer (openai-chat / opencode-session / fallback)
+│   │   └── node-registry.ts    # Node type definitions
 │   ├── server/            # Express HTTP + WebSocket
 │   ├── mcp/               # MCP stdio tools
 │   └── web/               # React + React Flow SPA
 │       ├── App.tsx
 │       ├── components/
 │       └── lib/api.ts
-├── tests/                 # Vitest — 40 tests
-├── docs/                  # Architecture, MCP, Security, etc.
-├── skills/                # Agent skills (generate, edit, review, compose)
+├── tests/                 # Vitest — 47 tests
+├── docs/                  # Architecture, MCP, LLM, Security, etc.
+├── skills/                # 5 agent skills (router, compose, generate, edit, review)
 ├── scripts/               # doctor, install-skills, probe-mcp, release
-├── examples/              # Sample workflows + config
+├── assets/                # Repo-owned images (hero, icons)
 ├── package.json
 └── tsconfig.json
 ```
@@ -365,14 +371,15 @@ The quality gate covers:
 - Graph type checking, cycle prevention, revisions, invalid targets
 - Same-process and multi-connection SQLite concurrency
 - Immutable run snapshots and lease recovery
-- OpenCode `info.structured` contract and real Vision Review file attachments
+- OpenAI-compatible chat completions contract for Prompt Architect and Vision Review
+- Fallback LLM provider and provider factory branches
 - Image API Base64/URL responses, headers, retries, cancellation, SSRF, masks
 - Candidate Selector pause/resume, final status, true replacement, subworkflows
 - zod-validated server routes
 - Production Node/Web build and MCP stdio probe
 
 ```bash
-npm test    # 40 tests, ~4s
+npm test    # 47 tests, ~5s
 ```
 
 See [`REVIEW.md`](REVIEW.md) for detailed test boundaries.
@@ -384,7 +391,7 @@ VibeCanvas is **local-first** and binds to localhost by default. It is not a rea
 - API keys live in the shared config file or environment variables — **never** in graph JSON, prompts, run metadata, or browser storage
 - Image download URLs pass through SSRF validation: protocol whitelist, private-IP rejection, DNS-rebinding-hardened IP pinning, 80 MB limit, 3-redirect cap
 - Server routes zod-validate request bodies
-- `.gitignore` excludes `.env`, `config.json`, and IDE directories
+- `.gitignore` excludes `.env`, `config.json`, `.vibecanvas/`, `.zcode/`, `.data/`, `.agents/`, IDE directories, and per-agent MCP config files
 
 Review [`docs/SECURITY.md`](docs/SECURITY.md) before exposing VibeCanvas to a network.
 

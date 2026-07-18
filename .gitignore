@@ -1,26 +1,36 @@
-# Dependencies
-node_modules/
+# =============================================================================
+# VibeCanvas .gitignore
+# 原则：源码 + 文档 + 静态资产入库；密钥、本地配置、运行时数据、依赖、构建产物不入库。
+# =============================================================================
 
-# Build output
+# ---------- 依赖 ----------
+node_modules/
+jspm_packages/
+
+# ---------- 构建产物 ----------
 dist/
 build/
+*.tsbuildinfo
 
-# Coverage
+# ---------- 测试覆盖率 ----------
 coverage/
 *.lcov
+.nyc_output/
 
-# Logs
+# ---------- 日志 ----------
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
-# OS files
+# ---------- 操作系统文件 ----------
 .DS_Store
 Thumbs.db
 Desktop.ini
+ehthumbs.db
 
-# IDE / Editor 配置目录（不上传）
+# ---------- 编辑器 / IDE 配置 ----------
 .vscode/
 .idea/
 *.swp
@@ -28,41 +38,61 @@ Desktop.ini
 *~
 .project
 .settings/
+.history/
 
-# VibeCanvas 运行时数据（用户项目本地生成，不属于源码）
-.vibecanvas/
-
-# ZCode 本地工作目录（plan / session 产物）
-.zcode/
-
-# Remotion / 第三方 MCP 本地数据
-.data/
-
-# 环境变量与密钥（只有模板可以提交）
+# ---------- 环境变量与密钥（只允许 *.example 模板入库）----------
 .env
 .env.local
 .env.*.local
+.env.*.secret
 *.env
 !*.env.example
 !.env.example
 
-# 配置文件可能含 API Key（只有 example 可提交）
+# ---------- VibeCanvas 运行时数据 ----------
+# 项目本地的 SQLite/Artifact/Run 产物，每个用户独立，不属于源码
+.vibecanvas/
+
+# ---------- 第三方 MCP / 本地数据库产物 ----------
+.data/
+
+# ---------- ZCode 本地工作目录（plan / session 产物）----------
+.zcode/
+
+# ---------- install-skills 本地生成物 ----------
+# 这些配置文件由 `vibecanvas install-skills` 按目标项目自动写入，
+# 不应入库（路径含绝对路径 + 可能含用户 token）。
+.agents/
+opencode.json
+.mcp.json
+
+# ---------- 用户级配置文件 ----------
+# VibeCanvas 全局 config 可能含 API key
 config.json
 !**/config.example.json
 !**/*.example.json
 
-# 临时文件与缓存
+# ---------- 临时与缓存 ----------
 *.tmp
 *.bak
 *.cache
+*.pid
 tmp/
 .temp/
+.cache/
 
-# 打包产物
+# ---------- 打包产物 ----------
 *.zip
 *.tar.gz
 *.tgz
+*.7z
 
-# 锁文件（保留 package-lock.json）
+# ---------- 其他锁文件（保留 package-lock.json）----------
 yarn.lock
 pnpm-lock.yaml
+
+# ---------- 生成图像 / 临时输出 ----------
+# 不要把本地试跑出来的图入库；用 assets/ 放仓库自带的官方资产
+output/
+outputs/
+generated_images/
