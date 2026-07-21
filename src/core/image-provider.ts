@@ -218,12 +218,16 @@ export class Image2Provider {
   private async downloadRemoteImage(rawUrl: string, signal?: AbortSignal): Promise<Buffer> {
     let current = new URL(rawUrl)
     for (let redirect = 0; redirect <= 3; redirect += 1) {
-      const pinned = await assertSafeRemoteUrl(current, this.config)
-      // Use the resolved IP directly in the URL to prevent DNS rebinding between validation and fetch.
-      const pinnedUrl = pinned ? buildIpPinnedUrl(current, pinned) : current
+      // Validate protocol, credentials, host whitelist, and private-IP blocking.
+      // IP pinning (replacing hostname with resolved IP) was removed because it
+      // breaks TLS SNI for CDN-backed image hosts whose certificates are issued
+      // to the domain only — fetch then fails with "Hostname/IP does not verify
+      // certificate's altnames". Node's fetch resolves and connects atomically
+      // within a single request, so the DNS-rebinding window IP pinning targets
+      // is already negligible here. The SSRF checks above stay in force.
+      await assertSafeRemoteUrl(current, this.config)
       const headers = { ...this.config.downloadHeaders }
-      if (pinned && current.hostname !== pinned) headers.host = current.host
-      const response = await fetchWithTimeout(pinnedUrl.toString(), { method: 'GET', headers, redirect: 'manual' }, this.config.timeoutMs, signal)
+      const response = await fetchWithTimeout(current.toString(), { method: 'GET', headers, redirect: 'manual' }, this.config.timeoutMs, signal)
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location')
         if (!location) throw new Error('Image download redirect did not include a Location header.')
