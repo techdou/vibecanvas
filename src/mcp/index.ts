@@ -123,7 +123,7 @@ export async function startMcpServer(): Promise<McsServerHandle> {
 }
 
 function result(value: unknown) {
-  return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }], structuredContent: value && typeof value === 'object' ? value as Record<string, unknown> : { value } }
+  return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }], structuredContent: value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : { value } }
 }
 
 // Auto-start only when this file is the Node entry point (directly invoked as

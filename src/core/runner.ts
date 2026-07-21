@@ -112,7 +112,10 @@ export class WorkflowRunner extends EventEmitter {
       const latest = await this.storage.loadRun(run.id)
       const cancelled = controller.signal.aborted || latest?.status === 'cancelled' || error instanceof DOMException && error.name === 'AbortError'
       run.status = cancelled ? 'cancelled' : 'failed'; run.completedAt = nowIso(); run.workerId = undefined; run.lockExpiresAt = undefined
-      run.error = cancelled ? 'Run cancelled.' : error instanceof Error ? error.message : String(error)
+      // Preserve the root cause chain (e.g. TLS errors nested under "fetch failed")
+      // so run records surface *why* a node failed, not just the outer wrapper.
+      const causeChain = error instanceof Error && error.cause instanceof Error ? ` [cause: ${error.cause.message}${error.cause.cause instanceof Error ? ` :: ${error.cause.cause.message}` : ''}]` : ''
+      run.error = cancelled ? 'Run cancelled.' : (error instanceof Error ? error.message : String(error)) + causeChain
       const activeNode = Object.values(run.nodeRuns).find((item) => item.status === 'running')
       if (activeNode) { activeNode.status = cancelled ? 'cancelled' : 'failed'; activeNode.completedAt = run.completedAt; activeNode.error = run.error }
       await this.storage.saveRun(run)
