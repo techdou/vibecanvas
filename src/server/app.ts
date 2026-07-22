@@ -1,3 +1,4 @@
+import { createReadStream } from 'node:fs'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -106,7 +107,8 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   app.get('/api/artifacts', async (req, res) => res.json(await storage.listArtifacts({
     limit: req.query.limit ? Number(req.query.limit) : undefined,
     status: typeof req.query.status === 'string' ? req.query.status as ArtifactRef['status'] : undefined,
-    runId: typeof req.query.runId === 'string' ? req.query.runId : undefined
+    runId: typeof req.query.runId === 'string' ? req.query.runId : undefined,
+    kind: typeof req.query.kind === 'string' ? req.query.kind : undefined
   })))
   app.get('/api/artifacts/:id', async (req, res) => {
     const artifact = await storage.getArtifact(req.params.id)
@@ -115,10 +117,17 @@ export async function createVibeCanvasApp(providedConfig?: RuntimeConfig): Promi
   })
   app.get('/api/artifacts/:id/lineage', async (req, res) => res.json(await storage.artifactLineage(req.params.id)))
   app.patch('/api/artifacts/:id/status', async (req, res) => res.json(await storage.updateArtifactStatus(req.params.id, req.body.status, req.body.metadata || {})))
-  app.get('/api/artifacts/:id/file', async (req, res) => {
-    const artifact = await storage.getArtifact(req.params.id)
-    if (!artifact) return res.status(404).end()
-    res.type(artifact.mimeType); res.sendFile(artifact.filePath)
+  app.get('/api/artifacts/:id/file', async (req, res, next) => {
+    try {
+      const artifact = await storage.getArtifact(req.params.id)
+      if (!artifact) return res.status(404).end()
+      res.type(artifact.mimeType)
+      createReadStream(artifact.filePath)
+        .on('error', (error) => next(error))
+        .pipe(res)
+    } catch (error) {
+      next(error)
+    }
   })
 
   app.post('/api/runs', async (req, res) => {

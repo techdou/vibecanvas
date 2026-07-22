@@ -145,6 +145,7 @@ export class WorkspaceStorage {
       if (!changed) throw new RevisionConflictError(current, expectedRevision)
       db.prepare('INSERT INTO graph_revisions(graph_id, revision, graph_json, transaction_id, created_at) VALUES(?,?,?,?,?)')
         .run(next.id, next.revision, JSON.stringify(next), transactionId, next.updatedAt)
+      this.pruneGraphRevisions(next.id)
       return next
     })
   }
@@ -163,8 +164,17 @@ export class WorkspaceStorage {
       if (!changed) throw new RevisionConflictError(current.revision, patch.baseRevision)
       db.prepare('INSERT INTO graph_revisions(graph_id, revision, graph_json, transaction_id, created_at) VALUES(?,?,?,?,?)')
         .run(graphId, next.revision, JSON.stringify(next), patch.transactionId, next.updatedAt)
+      this.pruneGraphRevisions(graphId)
       return next
     })
+  }
+
+  /** 只保留最新的 keepCount 条 revision 快照,删除旧记录。 */
+  private pruneGraphRevisions(graphId: string, keepCount = 10): void {
+    const db = this.requireDb()
+    db.prepare(`DELETE FROM graph_revisions WHERE graph_id = ? AND revision NOT IN (
+      SELECT revision FROM graph_revisions WHERE graph_id = ? ORDER BY revision DESC LIMIT ?
+    )`).run(graphId, graphId, keepCount)
   }
 
   async listGraphRevisions(graphId = 'main', limit = 50): Promise<Array<{ revision: number; transactionId?: string; createdAt: string }>> {
@@ -196,12 +206,13 @@ export class WorkspaceStorage {
     return next
   }
 
-  async listArtifacts(options: { limit?: number; status?: ArtifactStatus; runId?: string } = {}): Promise<ArtifactRef[]> {
+  async listArtifacts(options: { limit?: number; status?: ArtifactStatus; runId?: string; kind?: string } = {}): Promise<ArtifactRef[]> {
     await this.init()
     const clauses: string[] = []
     const values: Array<string | number | null> = []
     if (options.status) { clauses.push('status = ?'); values.push(options.status) }
     if (options.runId) { clauses.push('run_id = ?'); values.push(options.runId) }
+    if (options.kind) { clauses.push('kind = ?'); values.push(options.kind) }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
     const limit = Math.max(1, Math.min(options.limit ?? 500, 5000))
     const rows = this.requireDb().prepare(`SELECT * FROM artifacts ${where} ORDER BY created_at ASC LIMIT ?`).all(...values, limit) as DbRow[]

@@ -27,6 +27,19 @@ describe('HTTP server', () => {
     expect(capabilities.capabilities.textToImage).toBe(true)
   })
 
+  it('streams registered artifact files', async () => {
+    const { dir } = await tempWorkspace('vibecanvas-server-artifact-')
+    const runtime = await createVibeCanvasApp(makeRuntimeConfig(dir))
+    runtimes.push(runtime)
+    const filePath = await runtime.storage.saveUploadedFile(Buffer.from('artifact-file-body'), 'fixture.txt')
+    const artifact = await runtime.storage.registerArtifact({ filePath, kind: 'text', status: 'final' })
+    await new Promise<void>((resolve) => runtime.server.listen(0, '127.0.0.1', () => resolve()))
+    const address = runtime.server.address(); if (!address || typeof address === 'string') throw new Error('No port')
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/artifacts/${artifact.id}/file`)
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('artifact-file-body')
+  })
+
   it('returns 409 for stale transactional graph patches', async () => {
     const { dir } = await tempWorkspace('vibecanvas-server-revision-')
     const runtime = await createVibeCanvasApp(makeRuntimeConfig(dir))

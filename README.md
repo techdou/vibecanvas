@@ -13,7 +13,7 @@
   <img alt="Node.js" src="https://img.shields.io/badge/node-%E2%89%A5%2022.5-brightgreen" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.9-blue" />
   <img alt="MCP" src="https://img.shields.io/badge/MCP-21%20tools-purple" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-47%20passed-brightgreen" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-54%20passed-brightgreen" />
 </p>
 
 ---
@@ -85,16 +85,20 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component view.
 
 ### Infinite canvas
 
-- Free, workflow, and hybrid modes
+- Clean creation-first UI — workflow nodes stay hidden, users only see images, notes, and placeholders
+- Collapsible side panels (creation panel + inspector) for full-canvas focus mode
+- Drag-and-drop artifacts from the inspector directly onto the canvas
 - Images, notes, annotations, masks, nodes, connections, and previews in one coordinate system
 - Strong port types with 14 typed ports and cycle prevention
-- Revision history, templates, and subworkflows
-- Partial execution to a selected node
+- Revision history with automatic pruning (keeps latest 10 snapshots)
+- Templates and subworkflows
 
 ### Image creation
 
 - OpenAI-compatible `/images/generations` and multipart `/images/edits`
 - Text-to-image, source image, multiple references, annotation image, and alpha mask
+- **Arrow annotation editing** — draw arrows and text labels directly on canvas images to guide image-to-image edits, Cowart-style
+- Automatic image compression for edit inputs exceeding provider file-size limits (4 MB threshold)
 - Base64 or URL responses with SSRF protection (DNS-rebinding hardened via IP pinning)
 - Custom endpoint paths, model aliases, request/download headers
 - Output normalization to PNG/JPEG/WebP
@@ -330,7 +334,7 @@ vibecanvas/
 │       ├── App.tsx
 │       ├── components/
 │       └── lib/api.ts
-├── tests/                 # Vitest — 47 tests
+├── tests/                 # Vitest — 54 tests
 ├── docs/                  # Architecture, MCP, LLM, Security, etc.
 ├── skills/                # 5 agent skills (router, compose, generate, edit, review)
 ├── scripts/               # doctor, install-skills, probe-mcp, release
@@ -379,7 +383,7 @@ The quality gate covers:
 - Production Node/Web build and MCP stdio probe
 
 ```bash
-npm test    # 47 tests, ~5s
+npm test    # 54 tests, ~5s
 ```
 
 See [`REVIEW.md`](REVIEW.md) for detailed test boundaries.
