@@ -94,7 +94,7 @@ export class Image2Provider {
       ? `\nStructured annotation notes:\n${annotationNotes.trim()}`
       : ''
     const prompt = request.annotation
-      ? `${promptBase}\n\nUse the supplied annotation image as an edit brief. Apply the visible notes and marked regions, but remove every annotation mark, arrow, label, selection outline, and editor UI from the final image.${annotationInstruction}`
+      ? `${promptBase}\n\nThe second image is a transparent annotation overlay placed on top of the source image. It contains arrows, labels and brush marks indicating what to change. Follow the annotations to edit the corresponding areas of the source image. Do not include any annotation marks, arrows, labels or overlays in the final output.${annotationInstruction}`
       : promptBase
     const references = request.references ?? []
     if (references.length > this.config.capabilities.maxReferences) throw new Error(`Provider supports at most ${this.config.capabilities.maxReferences} reference images.`)
@@ -174,9 +174,9 @@ export class Image2Provider {
     if (!request.mask) {
       return {
         images: await Promise.all([source, ...references].map(async (artifact, index) => ({
-          buffer: await readFile(artifact.filePath), mimeType: artifact.mimeType, fileName: `${index === 0 ? 'source' : `reference-${index}`}${extensionForMime(artifact.mimeType)}`
+          buffer: await readImageCompressed(artifact.filePath), mimeType: 'image/jpeg', fileName: `${index === 0 ? 'source' : `reference-${index}`}.jpg`
         }))),
-        annotation: request.annotation ? { buffer: await readFile(request.annotation.filePath), mimeType: request.annotation.mimeType, fileName: `annotation${extensionForMime(request.annotation.mimeType)}` } : undefined
+        annotation: request.annotation ? { buffer: await readImageCompressed(request.annotation.filePath), mimeType: 'image/jpeg', fileName: 'annotation.jpg' } : undefined
       }
     }
     const sourceMeta = await sharp(source.filePath).metadata()
@@ -387,6 +387,23 @@ async function assertEditInputSizes(artifacts: ArtifactRef[]): Promise<void> {
     const resolved = typeof size === 'number' ? size : await size
     if (resolved > limit) throw new Error(`Edit input exceeds the 50 MB limit: ${artifact.fileName} (${resolved} bytes).`)
   }
+}
+
+/**
+ * 读取图片文件,如果超过 3.5MB 自动压缩为 JPEG (quality 85),确保不超过 Image API 4MB 限制。
+ * 支持 PNG/JPEG/WebP 输入。annotation 透明叠加层也会被压到 JPEG(白底合成)。
+ */
+async function readImageCompressed(filePath: string): Promise<Buffer> {
+  const raw = await readFile(filePath)
+  if (raw.length <= 3.5 * 1024 * 1024) return raw
+  // 超过 3.5MB,用 sharp 压缩为 JPEG q85
+  const pipeline = sharp(raw, { failOn: 'error' }).rotate()
+  const meta = await pipeline.metadata()
+  // 如果超过 2048px,同时缩小尺寸
+  const resized = (meta.width && meta.width > 2048) ? pipeline.resize(2048, 2048, { fit: 'inside' }) : pipeline
+  // 透明图合成白底再转 JPEG
+  const flattened = resized.flatten({ background: { r: 255, g: 255, b: 255 } })
+  return flattened.jpeg({ quality: 85, mozjpeg: true }).toBuffer()
 }
 
 function normalizeOutputFormat(value: string): 'png' | 'jpeg' | 'webp' {
