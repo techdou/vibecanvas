@@ -1,4 +1,5 @@
-import { GitBranch, ImageDown, Play, Save, Scissors, Upload } from 'lucide-react'
+import { ChevronDown, ChevronRight, GitBranch, ImageDown, Play, Save, Scissors, Upload } from 'lucide-react'
+import { useState } from 'react'
 import type { ArtifactRef, CanvasNode, ConfigFieldDefinition, NodeDefinition } from '../../core/types.js'
 
 interface Props {
@@ -21,7 +22,7 @@ export function Inspector({ node, definition, artifacts, onChange, onRun, onUplo
   return <aside className="inspector panel-shell">
     <div className="panel-title"><Save size={17} /><span>{definition.label}</span></div><p className="panel-help">{definition.description}</p>
     <div className="inspector-actions"><button onClick={onRun}><Play size={14} />运行到此</button></div>
-    {selectedArtifact && ['canvas.image','input.image'].includes(node.data.nodeType) ? <div className="inspector-actions editor-actions"><button onClick={() => onOpenEditor('annotation')}><ImageDown size={14} />批注</button><button onClick={() => onOpenEditor('mask')}><Scissors size={14} />Mask</button><button onClick={() => onLineage(selectedArtifact)}><GitBranch size={14} />版本树</button></div> : null}
+    {selectedArtifact && ['canvas.image','input.image'].includes(node.data.nodeType) ? <div className="inspector-actions editor-actions"><button onClick={() => onOpenEditor('annotation')}><ImageDown size={14} />箭头修改</button><button onClick={() => onOpenEditor('mask')}><Scissors size={14} />Mask</button><button onClick={() => onLineage(selectedArtifact)}><GitBranch size={14} />版本树</button></div> : null}
     <div className="field-list">{definition.configFields.map((field) => <ConfigField key={field.key} field={field} value={node.data.config[field.key]} onChange={(value) => onChange({ [field.key]: value })} onUpload={onUpload} />)}</div>
     {node.data.outputs ? <details className="json-details"><summary>最近设计态输出</summary><pre>{JSON.stringify(node.data.outputs, null, 2)}</pre></details> : null}
     <ArtifactList artifacts={artifacts} onLineage={onLineage} onPlace={onPlaceArtifact} />
@@ -40,5 +41,31 @@ function ConfigField({ field, value, onChange, onUpload }: { field: ConfigFieldD
 }
 
 function ArtifactList({ artifacts, onLineage, onPlace }: { artifacts: ArtifactRef[]; onLineage: (artifact: ArtifactRef) => void; onPlace: (artifact: ArtifactRef) => void }) {
-  return <section className="artifact-section"><h3>素材库</h3><div className="artifact-grid">{artifacts.slice().reverse().slice(0, 20).map((artifact) => <article key={artifact.id} title={`${artifact.fileName}\n${artifact.width ?? '?'}×${artifact.height ?? '?'}\n${artifact.status}`}><img src={artifact.url} alt={artifact.fileName} /><div><button onClick={() => onPlace(artifact)}>放置</button><button onClick={() => onLineage(artifact)}>版本</button></div></article>)}{!artifacts.length ? <small>还没有上传或生成图片。</small> : null}</div></section>
+  const [open, setOpen] = useState(true)
+  // 数据源已按 kind=image 过滤,这里做防御性二次检查
+  const imageArtifacts = artifacts.filter((item) => item.kind === 'image')
+  const handleDragStart = (event: React.DragEvent, artifact: ArtifactRef) => {
+    event.dataTransfer.setData('application/vibecanvas-artifact', artifact.id)
+    event.dataTransfer.effectAllowed = 'copy'
+  }
+  const handleDownload = async (artifact: ArtifactRef) => {
+    const res = await fetch(artifact.url)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = artifact.fileName || `${artifact.id}.png`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+  return <section className="artifact-section collapsible">
+    <button className="collapse-header" onClick={() => setOpen(!open)}>
+      {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+      <h3>素材</h3>
+      <small>{imageArtifacts.length}</small>
+    </button>
+    {open ? <div className="artifact-grid">{imageArtifacts.slice().reverse().slice(0, 20).map((artifact) => <article key={artifact.id} title={`${artifact.fileName}\n${artifact.width ?? '?'}×${artifact.height ?? '?'}\n${artifact.status}`} draggable onDragStart={(e) => handleDragStart(e, artifact)}><img src={artifact.url} alt={artifact.fileName} /><div><button onClick={() => onPlace(artifact)} title="放到画布">放置</button><button onClick={() => handleDownload(artifact)} title="下载">下载</button><button onClick={() => onLineage(artifact)} title="版本树"><GitBranch size={12} /></button></div></article>)}</div> : null}
+  </section>
 }

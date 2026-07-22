@@ -24,7 +24,7 @@ export const api = {
   getRevisions: () => request<Array<{ revision: number; transactionId?: string; createdAt: string }>>('/api/graph/revisions'),
   restoreRevision: (revision: number) => request<WorkflowGraph>(`/api/graph/revisions/${revision}/restore`, { method: 'POST' }),
   getRegistry: () => request<NodeDefinition[]>('/api/node-registry'),
-  getArtifacts: (limit = 500) => request<ArtifactRef[]>(`/api/artifacts?limit=${limit}`),
+  getArtifacts: (limit = 500, status?: string, runId?: string, kind?: string) => request<ArtifactRef[]>(`/api/artifacts?limit=${limit}${status ? `&status=${status}` : ''}${runId ? `&runId=${runId}` : ''}${kind ? `&kind=${kind}` : ''}`),
   getLineage: (artifactId: string) => request<ArtifactLineage>(`/api/artifacts/${artifactId}/lineage`),
   setArtifactStatus: (artifactId: string, status: ArtifactRef['status']) => request<ArtifactRef>(`/api/artifacts/${artifactId}/status`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status }) }),
   getRuns: () => request<WorkflowRun[]>('/api/runs'),
@@ -33,10 +33,11 @@ export const api = {
   cancelRun: (runId: string) => request<{ cancelled: boolean }>(`/api/runs/${runId}/cancel`, { method: 'POST' }),
   selectCandidate: (runId: string, nodeId: string, artifactId: string) => request(`/api/runs/${runId}/nodes/${nodeId}/select`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ artifactId }) }),
   saveSelection: (selection: Omit<SelectionState, 'updatedAt'>) => request<SelectionState>('/api/selection', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(selection) }),
-  upload: async (file: File | Blob, role = 'reference', kind: ArtifactRef['kind'] = 'image', sourceArtifactId?: string, fileName?: string, notes?: string) => {
+  upload: async (file: File | Blob, role = 'reference', kind: ArtifactRef['kind'] = 'image', sourceArtifactId?: string, fileName?: string, notes?: string, parentArtifactIds?: string[]) => {
     const form = new FormData(); form.set('file', file, fileName || (file instanceof File ? file.name : `${kind}.png`)); form.set('role', role); form.set('kind', kind)
     if (sourceArtifactId) form.set('sourceArtifactId', sourceArtifactId)
     if (notes) form.set('notes', notes)
+    if (parentArtifactIds && parentArtifactIds.length) form.set('parentArtifactIds', parentArtifactIds.join(','))
     return request<ArtifactRef>('/api/uploads', { method: 'POST', body: form })
   },
   placeArtifact: (artifactId: string, position?: { x: number; y: number }) => request<{ node: unknown; graph: WorkflowGraph }>(`/api/artifacts/${artifactId}/place`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ position }) }),

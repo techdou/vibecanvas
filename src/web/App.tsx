@@ -3,7 +3,7 @@ import {
   addEdge, applyEdgeChanges, applyNodeChanges, Background, BackgroundVariant, Controls, MiniMap, Panel, ReactFlow,
   ReactFlowProvider, type Connection, type EdgeChange, type NodeChange, type OnSelectionChangeParams, type ReactFlowInstance, type Viewport
 } from '@xyflow/react'
-import { BookmarkPlus, CheckCircle2, CircleAlert, Clock3, History, Play, RotateCcw, Settings2, Workflow } from 'lucide-react'
+import { CheckCircle2, CircleAlert, History, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, RotateCcw, Settings2, Workflow } from 'lucide-react'
 import type {
   ArtifactLineage, ArtifactRef, CanvasEdge, CanvasNode, GraphPatchOperation, NodeDefinition, RunEvent,
   TemplateRecord, ValidationResult, VibeCanvasConfigFile, WorkflowGraph, WorkflowRun
@@ -11,14 +11,25 @@ import type {
 import { arePortTypesCompatible } from '../core/port-types.js'
 import { defaultConfigForNode, getNodeDefinition } from '../core/node-registry.js'
 import { api } from './lib/api.js'
+import { ensureImageEditWorkflow } from './lib/edit-workflow.js'
 import { Inspector } from './components/Inspector.js'
-import { NodePalette } from './components/NodePalette.js'
+import { CreatePanel, type GenerateConfig } from './components/CreatePanel.js'
 import { WorkflowNode } from './components/WorkflowNode.js'
 import { ImageMarkupEditor } from './components/ImageMarkupEditor.js'
 import { CandidateSelector } from './components/CandidateSelector.js'
 import { ArtifactLineagePanel } from './components/ArtifactLineagePanel.js'
 import { RunPanel } from './components/RunPanel.js'
 import { ProviderSettings } from './components/ProviderSettings.js'
+
+/** Canvas-visible nodes: freeform items (image/note/annotation). Workflow nodes stay in the graph but are not rendered. */
+function isCanvasNode(node: CanvasNode): boolean {
+  return node.data.freeform === true || node.data.nodeType.startsWith('canvas.')
+}
+
+/** Active run context: tells WebSocket completion handler how to fill results back. */
+type ActiveRunContext =
+  | { kind: 'generate'; placeholderNodeId: string }
+  | { kind: 'edit'; sourceNodeId: string; sourceArtifactId: string; annotationArtifactId: string }
 
 const nodeTypes = { workflow: WorkflowNode }
 export default function App() { return <ReactFlowProvider><Studio /></ReactFlowProvider> }
@@ -44,22 +55,48 @@ function Studio() {
   const [candidateRun, setCandidateRun] = useState<WorkflowRun>()
   const [lineage, setLineage] = useState<ArtifactLineage>()
   const [markupMode, setMarkupMode] = useState<'annotation' | 'mask'>()
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [generateProgress, setGenerateProgress] = useState('')
+  const [candidates, setCandidates] = useState<ArtifactRef[]>([])
+  const [activeRunId, setActiveRunId] = useState<string>()
+  const [activeRunContext, setActiveRunContext] = useState<ActiveRunContext>()
   const flowRef = useRef<ReactFlowInstance<CanvasNode, CanvasEdge> | null>(null)
   const graphRef = useRef<WorkflowGraph | null>(null)
   const nodesRef = useRef<CanvasNode[]>([])
+  const activeRunIdRef = useRef<string | undefined>(undefined)
+  const activeRunContextRef = useRef<ActiveRunContext | undefined>(undefined)
   const geometryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => { graphRef.current = graph }, [graph])
   useEffect(() => { nodesRef.current = nodes }, [nodes])
+  useEffect(() => { activeRunIdRef.current = activeRunId }, [activeRunId])
+  useEffect(() => { activeRunContextRef.current = activeRunContext }, [activeRunContext])
 
   const registryMap = useMemo(() => new Map(registry.map((item) => [item.type, item])), [registry])
   const selectedNode = nodes.find((node) => node.id === selectedNodeId)
+  // Only canvas items appear on the board; workflow nodes are hidden but kept in the graph.
+  const visibleNodes = useMemo(() => nodes.filter(isCanvasNode), [nodes])
+  const visibleEdges = useMemo(() => edges.filter((edge) => {
+    const sourceVisible = visibleNodes.some((n) => n.id === edge.source)
+    const targetVisible = visibleNodes.some((n) => n.id === edge.target)
+    return sourceVisible && targetVisible
+  }), [edges, visibleNodes])
+  // Cache hidden workflow node IDs so the generate flow can drive them without user seeing them.
+  const workflowNodeIds = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const node of graph?.nodes || []) {
+      if (!isCanvasNode(node)) map[node.data.nodeType] = node.id
+    }
+    return map
+  }, [graph])
   const selectedDefinition = selectedNode ? registryMap.get(selectedNode.data.nodeType) || getNodeDefinition(selectedNode.data.nodeType) : undefined
   const selectedArtifact = selectedNode?.data.config.artifactId ? artifacts.find((item) => item.id === selectedNode.data.config.artifactId) : undefined
 
   const hydrate = useCallback(async () => {
     const [loadedGraph, loadedRegistry, loadedArtifacts, loadedRuns, loadedTemplates, health] = await Promise.all([
-      api.getGraph(), api.getRegistry(), api.getArtifacts(), api.getRuns(), api.getTemplates(), api.health()
+      api.getGraph(), api.getRegistry(), api.getArtifacts(500, undefined, undefined, 'image'), api.getRuns(), api.getTemplates(), api.health()
     ])
     setGraph(loadedGraph); setNodes(loadedGraph.nodes); setEdges(loadedGraph.edges); setRegistry(loadedRegistry)
     setArtifacts(loadedArtifacts); setRuns(loadedRuns); setTemplates(loadedTemplates); setImageConfigured(health.imageConfigured)
@@ -67,7 +104,7 @@ function Studio() {
   }, [])
 
   const refreshRuntime = useCallback(async () => {
-    const [loadedArtifacts, loadedRuns] = await Promise.all([api.getArtifacts(), api.getRuns()])
+    const [loadedArtifacts, loadedRuns] = await Promise.all([api.getArtifacts(500, undefined, undefined, 'image'), api.getRuns()])
     setArtifacts(loadedArtifacts); setRuns(loadedRuns)
   }, [])
 
@@ -83,6 +120,47 @@ function Studio() {
           const runEvent = JSON.parse(event.data) as RunEvent
           setEvents((current) => [runEvent, ...current].slice(0, 50)); setMessage(runEvent.message || runEvent.type)
           void refreshRuntime()
+          if (runEvent.type === 'run-completed' && activeRunIdRef.current === runEvent.runId && activeRunContextRef.current) {
+            const context = activeRunContextRef.current
+            void api.getArtifacts(100, 'candidate', runEvent.runId).then(async (arts) => {
+              const finishGenerate = async (placeholderId: string) => {
+                if (arts.length === 1) {
+                  await commitPatch([{ op: 'updateNode', nodeId: placeholderId, patch: { config: { artifactId: arts[0].id } } }], '填入生成结果')
+                  clearActiveRun()
+                  setMessage('生成完成，已填入画布。')
+                } else if (arts.length > 1) {
+                  setCandidates(arts); setGenerateProgress(''); setIsGenerating(false)
+                  setMessage(`生成完成，${arts.length} 张候选，请在左侧选择。`)
+                } else {
+                  clearActiveRun()
+                  setMessage('生成完成但未产出图片。')
+                }
+              }
+              const finishEdit = async (sourceNodeId: string) => {
+                if (arts.length === 1) {
+                  await placeSiblingImage(sourceNodeId, arts[0].id)
+                  clearActiveRun()
+                  setMessage('按标注修改完成，新图已放在原图右侧。')
+                } else if (arts.length > 1) {
+                  setCandidates(arts); setGenerateProgress(''); setIsGenerating(false)
+                  setMessage(`按标注修改完成，${arts.length} 张候选，请在左侧选择。`)
+                } else {
+                  clearActiveRun()
+                  setMessage('按标注修改完成但未产出图片。')
+                }
+              }
+              if (context.kind === 'generate') await finishGenerate(context.placeholderNodeId)
+              else await finishEdit(context.sourceNodeId)
+            })
+          }
+          if (runEvent.type === 'run-failed' && activeRunIdRef.current === runEvent.runId) {
+            clearActiveRun()
+            setMessage(`生成失败：${runEvent.message}`)
+          }
+          if (runEvent.type === 'node-completed' && activeRunIdRef.current === runEvent.runId) {
+            const nodeType = (runEvent.payload as { nodeType?: string })?.nodeType
+            if (nodeType) setGenerateProgress(`${nodeType} 完成…`)
+          }
           if (['run-completed','graph-updated','artifact-updated'].includes(runEvent.type)) void api.getGraph().then(syncGraph)
         } catch { /* ignore */ }
       }
@@ -185,19 +263,153 @@ function Studio() {
     const artifact = await api.upload(file, role, 'image'); setArtifacts((current) => [...current, artifact]); updateSelectedConfig({ artifactId: artifact.id }); setMessage(`已上传：${artifact.fileName}`)
   }, [updateSelectedConfig])
 
-  const saveMarkup = useCallback(async (blob: Blob, notes: string) => {
-    if (!selectedArtifact || !markupMode || !selectedNode) return
-    const kind = markupMode === 'mask' ? 'mask' : 'annotation'
-    const artifact = await api.upload(blob, markupMode, kind, selectedArtifact.id, `${kind}-${Date.now()}.png`, notes)
-    setArtifacts((current) => [...current, artifact])
-    const nodeType = markupMode === 'mask' ? 'input.mask' : 'input.annotation'
-    const position = { x: selectedNode.position.x + (selectedNode.width || 380) + 60, y: selectedNode.position.y + (markupMode === 'mask' ? 220 : 0) }
-    const newNode: CanvasNode = { id: `node-${crypto.randomUUID().slice(0, 8)}`, type: 'workflow', position, width: 300, height: 300, data: { nodeType, config: { ...defaultConfigForNode(nodeType), artifactId: artifact.id, sourceArtifactId: selectedArtifact.id, text: notes }, status: 'completed', previewArtifactId: artifact.id, freeform: false } }
-    await commitPatch([{ op: 'addNode', node: newNode }], markupMode === 'mask' ? '创建蒙版' : '创建批注')
-  }, [commitPatch, markupMode, selectedArtifact, selectedNode])
-
   const openLineage = useCallback(async (artifact: ArtifactRef) => setLineage(await api.getLineage(artifact.id)), [])
   const placeArtifact = useCallback(async (artifact: ArtifactRef) => { const result = await api.placeArtifact(artifact.id); syncGraph(result.graph) }, [syncGraph])
+
+  const addPlaceholder = useCallback(() => {
+    const position = flowRef.current?.screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 }) || { x: 300, y: 200 }
+    const node: CanvasNode = {
+      id: `node-${crypto.randomUUID().slice(0, 8)}`, type: 'workflow', position, width: 380, height: 380,
+      data: { nodeType: 'canvas.image', config: { artifactId: '' }, status: 'idle', freeform: true }
+    }
+    setNodes((current) => [...current, node]); setSelectedNodeId(node.id)
+    void commitPatch([{ op: 'addNode', node }], '添加 AI 图片框').catch((error) => setMessage(error.message))
+  }, [commitPatch])
+
+  /** 清理当前活跃 run 的所有 UI 和 ref 状态。 */
+  const clearActiveRun = useCallback(() => {
+    activeRunIdRef.current = undefined
+    activeRunContextRef.current = undefined
+    setIsGenerating(false); setActiveRunId(undefined); setActiveRunContext(undefined); setGenerateProgress('')
+  }, [])
+
+  /** 在源图右侧创建一个新的 canvas.image 兄弟节点,引用 edit 产出的 Artifact。 */
+  const placeSiblingImage = useCallback(async (sourceNodeId: string, artifactId: string) => {
+    const currentGraph = graphRef.current
+    if (!currentGraph) return
+    const sourceNode = currentGraph.nodes.find((node) => node.id === sourceNodeId)
+    if (!sourceNode) return
+    // 在源图右侧放置;若与可见节点相交,则向下递进寻找空位
+    const canvasNodes = currentGraph.nodes.filter(isCanvasNode)
+    const width = sourceNode.width || 380
+    const height = sourceNode.height || 380
+    const gap = 60
+    let x = sourceNode.position.x + width + gap
+    let y = sourceNode.position.y
+    const overlaps = () => canvasNodes.some((node) =>
+      node.id !== sourceNodeId &&
+      x < node.position.x + (node.width || 380) &&
+      x + width > node.position.x &&
+      y < node.position.y + (node.height || 380) &&
+      y + height > node.position.y
+    )
+    let attempts = 0
+    while (overlaps() && attempts < 20) {
+    y += height + gap
+    attempts += 1
+    }
+    const newNode: CanvasNode = {
+      id: `node-${crypto.randomUUID().slice(0, 8)}`, type: 'workflow', position: { x, y }, width, height,
+      data: {
+        nodeType: 'canvas.image',
+        config: { artifactId },
+        status: 'completed',
+        freeform: true,
+        label: '按标注修改'
+      }
+    }
+    await commitPatch([{ op: 'addNode', node: newNode }], '放置编辑结果')
+  }, [commitPatch])
+
+  const generateForPlaceholder = useCallback(async (nodeId: string, prompt: string, config: GenerateConfig) => {
+    const briefId = workflowNodeIds['input.brief']
+    const generateId = workflowNodeIds['image.generate']
+    const aspectId = workflowNodeIds['utility.aspect-ratio']
+    if (!briefId || !generateId) { setMessage('画布缺少隐藏的 brief/generate 工作流节点，请先重置为示例工作流。'); return }
+    activeRunContextRef.current = { kind: 'generate', placeholderNodeId: nodeId }
+    setIsGenerating(true); setCandidates([]); setActiveRunContext({ kind: 'generate', placeholderNodeId: nodeId }); setGenerateProgress('准备生成…')
+    try {
+      await commitPatch([{ op: 'updateNode', nodeId: briefId, patch: { config: { text: prompt } } }], '更新 brief')
+      await commitPatch([{ op: 'updateNode', nodeId: generateId, patch: { config: { quality: config.quality, candidateCount: config.candidateCount, outputFormat: 'png' } } }], '更新 generate 参数')
+      if (aspectId) await commitPatch([{ op: 'updateNode', nodeId: aspectId, patch: { config: { width: config.width, height: config.height } } }], '更新尺寸')
+      const accepted = await api.run(generateId)
+      activeRunIdRef.current = accepted.runId
+      setActiveRunId(accepted.runId); setGenerateProgress('正在生成…')
+    } catch (error) {
+      clearActiveRun()
+      setMessage(`生成启动失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [clearActiveRun, commitPatch, workflowNodeIds])
+
+  /** 把保存好的 annotation Artifact 接入隐藏 image.edit 子图并启动 run。 */
+  const editForImage = useCallback(async (sourceNodeId: string, annotationArtifactId: string, notes: string) => {
+    const currentGraph = graphRef.current
+    if (!currentGraph) { setMessage('画布尚未加载完成。'); return }
+    const sourceNode = currentGraph.nodes.find((node) => node.id === sourceNodeId)
+    const sourceArtifactId = String(sourceNode?.data.config.artifactId || '')
+    if (!sourceArtifactId) { setMessage('源图片未绑定 Artifact，无法编辑。'); return }
+
+    const brief = notes || '根据批注箭头和标签修改原图对应区域。'
+    const prepared = ensureImageEditWorkflow(currentGraph, {
+      sourceArtifactId,
+      annotationArtifactId,
+      brief,
+      quality: 'high',
+      candidateCount: 1
+    })
+
+    activeRunContextRef.current = { kind: 'edit', sourceNodeId, sourceArtifactId, annotationArtifactId }
+    setIsGenerating(true); setCandidates([])
+    setActiveRunContext({ kind: 'edit', sourceNodeId, sourceArtifactId, annotationArtifactId })
+    setGenerateProgress(prepared.created ? '准备编辑工作流…' : '更新编辑输入…')
+
+    try {
+      await commitPatch(prepared.operations, prepared.created ? '创建编辑工作流' : '更新编辑输入')
+      const accepted = await api.run(prepared.nodeIds.edit)
+      activeRunIdRef.current = accepted.runId
+      setActiveRunId(accepted.runId); setGenerateProgress('正在按标注修改…')
+    } catch (error) {
+      clearActiveRun()
+      setMessage(`编辑启动失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }, [clearActiveRun, commitPatch])
+
+  const saveMarkup = useCallback(async (blob: Blob, notes: string) => {
+    if (!selectedArtifact || !markupMode || !selectedNode) return
+    if (markupMode === 'mask') {
+      // mask 模式:创建独立 mask 节点,保持原有行为
+      const artifact = await api.upload(blob, 'mask', 'mask', selectedArtifact.id, `mask-${Date.now()}.png`, notes)
+      const nodeType = 'input.mask'
+      const position = { x: selectedNode.position.x + (selectedNode.width || 380) + 60, y: selectedNode.position.y + 220 }
+      const newNode: CanvasNode = { id: `node-${crypto.randomUUID().slice(0, 8)}`, type: 'workflow', position, width: 300, height: 300, data: { nodeType, config: { ...defaultConfigForNode(nodeType), artifactId: artifact.id, sourceArtifactId: selectedArtifact.id, text: notes }, status: 'completed', previewArtifactId: artifact.id, freeform: false } }
+      await commitPatch([{ op: 'addNode', node: newNode }], '创建蒙版')
+      return
+    }
+    // annotation 模式:上传 annotation Artifact(带 lineage parents),然后直接触发隐藏 edit 子图
+    // annotation 是中间产物,不追加到前端素材列表
+    const artifact = await api.upload(blob, 'annotation', 'annotation', selectedArtifact.id, `annotation-${Date.now()}.png`, notes, [selectedArtifact.id])
+    await editForImage(selectedNode.id, artifact.id, notes)
+  }, [commitPatch, editForImage, markupMode, selectedArtifact, selectedNode])
+
+  const selectCandidate = useCallback(async (artifactId: string) => {
+    const context = activeRunContextRef.current
+    activeRunIdRef.current = undefined
+    activeRunContextRef.current = undefined
+    setCandidates([]); setIsGenerating(false); setActiveRunId(undefined); setActiveRunContext(undefined)
+    if (!context) return
+    if (context.kind === 'generate') {
+      await commitPatch([{ op: 'updateNode', nodeId: context.placeholderNodeId, patch: { config: { artifactId } } }], '选择候选')
+      setMessage('已选择候选图片填入画布。')
+    } else {
+      await placeSiblingImage(context.sourceNodeId, artifactId)
+      setMessage('已选择候选，新图放在原图右侧。')
+    }
+  }, [commitPatch, placeSiblingImage])
+
+  const cancelGenerate = useCallback(async () => {
+    if (activeRunId) await api.cancelRun(activeRunId)
+    clearActiveRun()
+  }, [activeRunId, clearActiveRun])
 
   const loadConfig = useCallback(async () => { setConfigFile(await api.getConfig()); setShowSettings(true) }, [])
   const openHistory = useCallback(async () => { setRevisions(await api.getRevisions()); setShowHistory(true) }, [])
@@ -212,35 +424,62 @@ function Studio() {
   }, [flushGeometry])
 
   if (!graph) return <div className="boot-screen"><Workflow size={32} /><h1>VibeCanvas</h1><p>{message}</p></div>
-  const mode = graph.mode
-  return <div className={`app-shell mode-${mode}`}>
+  return <div className="app-shell">
     <header className="topbar">
-      <div className="brand"><div className="brand-mark"><Workflow size={20} /></div><div><strong>VibeCanvas 2</strong><small>Agent-native Visual Workflow Canvas · r{graph.revision}</small></div></div>
-      <div className="mode-switch">{(['free','workflow','hybrid'] as const).map((item) => <button key={item} className={mode === item ? 'active' : ''} onClick={() => void commitPatch([{ op: 'setMode', mode: item }], '切换模式')}>{item === 'free' ? '自由创作' : item === 'workflow' ? '工作流' : '混合模式'}</button>)}</div>
-      <div className="template-switch"><select defaultValue="" onChange={(e) => { if (e.target.value && confirm('应用模板会替换当前设计图，是否继续？')) void api.applyTemplate(e.target.value).then(syncGraph); e.target.value = '' }}><option value="">应用模板…</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select><button title="保存当前画布为模板" onClick={() => void saveCurrentTemplate()}><BookmarkPlus size={15} /></button></div>
+      <div className="brand"><div className="brand-mark"><Workflow size={20} /></div><div><strong>VibeCanvas</strong></div></div>
       <div className="top-actions">
         <span className={`provider-state ${imageConfigured ? 'ready' : 'missing'}`}>{imageConfigured ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}{imageConfigured ? 'Provider 已配置' : '未配置 Token'}</span>
-        <button onClick={() => void openHistory()}><History size={15} />历史</button><button onClick={() => void loadConfig()}><Settings2 size={15} />Provider</button>
-        <button onClick={() => void validate()}><Settings2 size={15} />验证</button><button onClick={() => setShowRuns(true)}><Clock3 size={15} />运行</button>
-        <button onClick={() => void run()} className="primary"><Play size={15} />运行全部</button>
-        <button onClick={() => { if (confirm('重置为示例工作流？')) void api.resetGraph().then(syncGraph) }} title="重置示例"><RotateCcw size={15} /></button>
+        <button onClick={() => void openHistory()}><History size={15} />历史</button>
+        <button onClick={() => void loadConfig()}><Settings2 size={15} />Provider</button>
+        <button onClick={() => { if (confirm('重置画布？')) void api.resetGraph().then(syncGraph) }} title="重置画布"><RotateCcw size={15} /></button>
       </div>
     </header>
-    <main className="studio-grid">
-      <NodePalette registry={registry} onAdd={addNode} />
+    <main className={`studio-grid ${leftCollapsed ? 'left-collapsed' : ''} ${rightCollapsed ? 'right-collapsed' : ''}`}>
+      <div className="panel-slot left-panel-slot">
+        <CreatePanel
+          selectedNode={selectedNode}
+          artifacts={artifacts}
+          isGenerating={isGenerating}
+          generateProgress={generateProgress}
+          candidates={candidates}
+          onAddPlaceholder={addPlaceholder}
+          onGenerate={generateForPlaceholder}
+          onSelectCandidate={selectCandidate}
+          onCancelGenerate={cancelGenerate}
+        />
+        <button className="collapse-btn collapse-left" onClick={() => setLeftCollapsed(!leftCollapsed)} title={leftCollapsed ? '展开创作面板' : '收起创作面板'}>
+          {leftCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+        </button>
+      </div>
       <section className="canvas-shell"><ReactFlow<CanvasNode, CanvasEdge>
-        nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
+        nodes={visibleNodes} edges={visibleEdges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect}
+        onDrop={(event) => {
+          event.preventDefault()
+          const artifactId = event.dataTransfer.getData('application/vibecanvas-artifact')
+          if (!artifactId || !flowRef.current) return
+          const position = flowRef.current.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+          const node: CanvasNode = {
+            id: `node-${crypto.randomUUID().slice(0, 8)}`, type: 'workflow', position, width: 380, height: 380,
+            data: { nodeType: 'canvas.image', config: { artifactId }, status: 'completed', freeform: true }
+          }
+          void commitPatch([{ op: 'addNode', node }], '拖入素材').catch((error) => setMessage(error.message))
+        }}
+        onDragOver={(event) => { if (event.dataTransfer.types.includes('application/vibecanvas-artifact')) event.preventDefault() }}
         onNodesDelete={(deleted) => void commitPatch(deleted.map((node) => ({ op: 'removeNode' as const, nodeId: node.id })), '删除节点')}
         onSelectionChange={onSelectionChange} isValidConnection={isValidConnection} onInit={(instance) => { flowRef.current = instance }}
         onMoveEnd={(_event, viewport: Viewport) => void commitPatch([{ op: 'setViewport', viewport }], '保存视口')}
         defaultViewport={graph.viewport} minZoom={0.1} maxZoom={2.5} fitView deleteKeyCode={['Backspace','Delete']} selectionOnDrag panOnScroll multiSelectionKeyCode="Shift" colorMode="light">
         <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} /><Controls position="bottom-left" /><MiniMap pannable zoomable position="bottom-right" />
         <Panel position="top-left" className="canvas-hint">{message}</Panel>
-        {validation ? <Panel position="bottom-center" className={`validation-banner ${validation.valid ? 'valid' : 'invalid'}`}>{validation.valid ? '工作流有效' : validation.problems.slice(0, 2).map((problem) => problem.message).join(' · ')}</Panel> : null}
       </ReactFlow></section>
-      <Inspector node={selectedNode} definition={selectedDefinition} artifacts={artifacts} onChange={updateSelectedConfig} onRun={() => selectedNode && void run(selectedNode.id)} onUpload={uploadForSelected} onOpenEditor={setMarkupMode} onLineage={(artifact) => void openLineage(artifact)} onPlaceArtifact={(artifact) => void placeArtifact(artifact)} />
+      <div className="panel-slot right-panel-slot">
+        <button className="collapse-btn collapse-right" onClick={() => setRightCollapsed(!rightCollapsed)} title={rightCollapsed ? '展开属性面板' : '收起属性面板'}>
+          {rightCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+        </button>
+        <Inspector node={selectedNode} definition={selectedDefinition} artifacts={artifacts} onChange={updateSelectedConfig} onRun={() => selectedNode && void run(selectedNode.id)} onUpload={uploadForSelected} onOpenEditor={setMarkupMode} onLineage={(artifact) => void openLineage(artifact)} onPlaceArtifact={(artifact) => void placeArtifact(artifact)} />
+      </div>
     </main>
-    <footer className="statusbar"><span>{nodes.length} 节点 · {edges.length} 连接 · {artifacts.length} 素材 · {runs.filter((item) => ['queued','running','needs-input'].includes(item.status)).length} 活跃 Run</span><span className="event-line">{events[0]?.message || '画布已就绪。'}</span></footer>
+    <footer className="statusbar"><span>{artifacts.length} 素材 · {runs.filter((item) => ['queued','running','needs-input'].includes(item.status)).length} 活跃 Run</span><span className="event-line">{events[0]?.message || '画布已就绪。'}</span></footer>
 
     {markupMode && selectedArtifact ? <ImageMarkupEditor artifact={selectedArtifact} mode={markupMode} onClose={() => setMarkupMode(undefined)} onSave={saveMarkup} /> : null}
     {showRuns ? <RunPanel runs={runs} onClose={() => setShowRuns(false)} onCancel={async (id) => { await api.cancelRun(id); await refreshRuntime() }} onChoose={(item) => { setCandidateRun(item); setShowRuns(false) }} /> : null}

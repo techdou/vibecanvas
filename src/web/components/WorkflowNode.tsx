@@ -1,5 +1,5 @@
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
-import { Bot, Boxes, CheckCircle2, Circle, FileImage, ImageIcon, LoaderCircle, MessageSquareText, Sparkles, TriangleAlert } from 'lucide-react'
+import { Bot, Boxes, CheckCircle2, Circle, FileImage, ImageIcon, ImagePlus, LoaderCircle, MessageSquareText, Sparkles, TriangleAlert } from 'lucide-react'
 import type { CanvasNodeData } from '../../core/types.js'
 import { getNodeDefinition } from '../../core/node-registry.js'
 
@@ -19,6 +19,8 @@ export function WorkflowNode({ data, selected }: NodeProps) {
   const definition = getNodeDefinition(nodeData.nodeType)
   const Icon = categoryIcons[definition?.category ?? 'canvas']
   const previewId = nodeData.previewArtifactId || String(nodeData.config.artifactId || '')
+  const isCanvasNode = definition?.category === 'canvas'
+  const isEmptyPlaceholder = nodeData.nodeType === 'canvas.image' && !previewId
   const statusIcon = nodeData.status === 'running'
     ? <LoaderCircle size={14} className="spin" />
     : nodeData.status === 'failed'
@@ -27,18 +29,48 @@ export function WorkflowNode({ data, selected }: NodeProps) {
         ? <CheckCircle2 size={14} />
         : <Circle size={11} />
 
+  // Empty AI image placeholder: dashed border + hint text, no ports.
+  if (isEmptyPlaceholder) {
+    return (
+      <div className={`ai-placeholder ${selected ? 'selected' : ''}`}>
+        <NodeResizer minWidth={200} minHeight={200} isVisible={selected} />
+        <ImagePlus size={28} />
+        <span className="placeholder-label">AI 图片框</span>
+        <span className="placeholder-hint">选中后在左侧写 prompt 生成</span>
+      </div>
+    )
+  }
+
+  // Canvas nodes (note/annotation/image-with-content): render without workflow ports.
+  if (isCanvasNode) {
+    return (
+      <div className={`workflow-node category-canvas status-${nodeData.status ?? 'idle'} ${selected ? 'selected' : ''}`}>
+        <NodeResizer minWidth={200} minHeight={120} isVisible={selected} />
+        <div className="node-header">
+          <span className="node-icon"><Icon size={16} /></span>
+          <div className="node-heading">
+            <strong>{nodeData.label || definition?.label || nodeData.nodeType}</strong>
+          </div>
+          <span className="node-status" title={nodeData.statusMessage}>{statusIcon}</span>
+        </div>
+        {previewId ? (
+          <div className="node-preview"><img src={`/api/artifacts/${previewId}/file`} alt="节点图片预览" /></div>
+        ) : (
+          <div className="node-content">
+            <p>{previewText(nodeData)}</p>
+          </div>
+        )}
+        {nodeData.statusMessage ? <div className="node-message">{nodeData.statusMessage}</div> : null}
+      </div>
+    )
+  }
+
+  // Workflow nodes (hidden from canvas by filtering, but keep renderer for safety).
   return (
     <div className={`workflow-node category-${definition?.category ?? 'canvas'} status-${nodeData.status ?? 'idle'} ${selected ? 'selected' : ''}`}>
       <NodeResizer minWidth={220} minHeight={120} isVisible={selected} />
       {definition?.inputs.map((port, index) => (
-        <Handle
-          key={port.id}
-          id={port.id}
-          type="target"
-          position={Position.Left}
-          style={{ top: 66 + index * 28 }}
-          title={`${port.label}: ${port.type}`}
-        />
+        <Handle key={port.id} id={port.id} type="target" position={Position.Left} style={{ top: 66 + index * 28 }} title={`${port.label}: ${port.type}`} />
       ))}
       <div className="node-header">
         <span className="node-icon"><Icon size={16} /></span>
@@ -59,14 +91,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
       )}
       {nodeData.statusMessage ? <div className="node-message">{nodeData.statusMessage}</div> : null}
       {definition?.outputs.map((port, index) => (
-        <Handle
-          key={port.id}
-          id={port.id}
-          type="source"
-          position={Position.Right}
-          style={{ top: 66 + index * 28 }}
-          title={`${port.label}: ${port.type}`}
-        />
+        <Handle key={port.id} id={port.id} type="source" position={Position.Right} style={{ top: 66 + index * 28 }} title={`${port.label}: ${port.type}`} />
       ))}
     </div>
   )
